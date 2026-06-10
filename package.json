@@ -1,9 +1,17 @@
 {
-  "name": "expo-panoramic-stitcher",
+  "name": "@notchip/expo-panoramic-stitcher",
   "version": "0.1.0",
   "description": "360° / wide panorama image stitching for Expo (SDK 56) via Swift + Kotlin, powered by OpenCV. No manual OpenCV download required.",
   "main": "build/index.js",
   "types": "build/index.d.ts",
+  "files": [
+    "build",
+    "src",
+    "android/build.gradle",
+    "android/src",
+    "ios",
+    "expo-module.config.json"
+  ],
   "scripts": {
     "build": "expo-module build",
     "clean": "expo-module clean",
@@ -30,6 +38,9 @@
   "author": "Raman-Halder",
   "bugs": {},
   "homepage": "https://github.com/notchip/expo-panoramic-stitcher#readme",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "devDependencies": {
     "expo-module-scripts": "^4.0.0"
   },

@@ -149,3 +149,5 @@ build/
 .eslintrc.js
 
 CLAUDE.md
+# Android gradle cache (accidentally committed earlier)
+android/.gradle/

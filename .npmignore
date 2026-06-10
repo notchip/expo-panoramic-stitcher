@@ -1,0 +1,10 @@
+# Native build artifacts — never ship these to consumers.
+# NOTE: do not use a bare **/build/ here; the root build/ is the compiled JS output.
+android/.gradle/
+android/build/
+android/.cxx/
+android/local.properties
+ios/Pods/
+ios/build/
+ios/.xcode.env.local
+*.log
