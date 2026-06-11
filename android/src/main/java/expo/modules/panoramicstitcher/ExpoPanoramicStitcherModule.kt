@@ -1,35 +1,55 @@
 package expo.modules.panoramicstitcher
 
+import android.graphics.BitmapFactory
 import android.util.Base64
-import android.util.Log
+import expo.modules.kotlin.Promise
+import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
-import expo.modules.kotlin.exception.CodedException
-import org.opencv.android.OpenCVLoader
-import org.opencv.core.Mat
-import org.opencv.core.MatOfInt
-import org.opencv.core.Size
-import org.opencv.imgcodecs.Imgcodecs
-import org.opencv.imgproc.Imgproc
-import org.opencv.stitching.Stitcher
 import java.io.File
 import java.util.UUID
-
-private const val TAG = "ExpoPanoramicStitcher"
+import java.util.concurrent.Executors
 
 class StitchException(message: String) : CodedException(message)
 
+/** JNI surface for the C++ stitch shim (src/main/cpp/panorama_stitcher_jni.cpp). */
+private object PanoramaStitcherNative {
+  init {
+    System.loadLibrary("panostitcher")
+  }
+
+  external fun nativeVersion(): String
+
+  external fun nativeStitch(
+    imagePaths: Array<String>,
+    outputPath: String,
+    warpMode: String,
+    blendStrength: Int,
+    matchConf: Float,
+    outputWidth: Int,
+    autoResize: Boolean,
+    jpegQuality: Int
+  ): String
+}
+
 /**
- * Pure-Kotlin panorama stitcher. OpenCV is pulled from Maven Central
- * (org.opencv:opencv) which ships a Java/Kotlin API plus bundled native libs —
- * so there is NO JNI, NO CMake and NO manual OpenCV SDK in this module.
+ * Panorama stitcher. OpenCV comes from Maven Central (org.opencv:opencv) — native
+ * .so libs bundled automatically, no manual SDK download. The AAR has no Java
+ * bindings for the stitching module, so stitching runs through one small JNI shim
+ * compiled against the AAR's prefab C++ headers (mirrors the iOS ObjC++ shim).
  */
 class ExpoPanoramicStitcherModule : Module() {
 
-  private val openCvReady: Boolean by lazy {
-    val ok = OpenCVLoader.initLocal()
-    if (!ok) Log.e(TAG, "OpenCVLoader.initLocal() failed")
-    ok
+  // Touching PanoramaStitcherNative triggers System.loadLibrary; libopencv_java4.so
+  // loads automatically as a DT_NEEDED dependency.
+  private val nativeReady: Boolean by lazy {
+    runCatching { PanoramaStitcherNative.nativeVersion() }.isSuccess
+  }
+
+  // Dedicated thread so multi-second OpenCV work never blocks the process-wide
+  // AsyncFunctionQueue shared by every Expo module.
+  private val stitchExecutor = Executors.newSingleThreadExecutor { r ->
+    Thread(r, "expo.panoramicstitcher.stitch")
   }
 
   override fun definition() = ModuleDefinition {
@@ -37,107 +57,121 @@ class ExpoPanoramicStitcherModule : Module() {
 
     Events("onStitchProgress")
 
-    Function("isAvailable") { openCvReady }
+    Function("isAvailable") { nativeReady }
 
     Function("helloFromNative") { name: String ->
-      if (openCvReady) "Hello $name, OpenCV ${org.opencv.core.Core.VERSION} is linked ✅"
+      if (nativeReady) "Hello $name, OpenCV ${PanoramaStitcherNative.nativeVersion()} is linked ✅"
       else "Hello $name (OpenCV failed to load)"
     }
 
-    AsyncFunction("stitchImagePaths") { imagePaths: List<String>, options: Map<String, Any?> ->
-      stitchToFile(imagePaths, StitchOptions.from(options))
+    AsyncFunction("stitchImagePaths") { imagePaths: List<String>, options: Map<String, Any?>, promise: Promise ->
+      runOnStitchThread(promise) {
+        emitProgress(0.3, "stitching")
+        val result = stitchToFile(imagePaths, StitchOptions.from(options))
+        emitProgress(1.0, "done")
+        result
+      }
     }
 
-    AsyncFunction("stitchBase64") { images: List<String>, options: Map<String, Any?> ->
-      val opts = StitchOptions.from(options)
-      val paths = images.map { writeTempImage(it) }
-      try {
-        val result = stitchToFile(paths, opts)
-        fileToBase64(result)
-      } finally {
-        paths.forEach { runCatching { File(it).delete() } }
+    AsyncFunction("stitchBase64") { images: List<String>, options: Map<String, Any?>, promise: Promise ->
+      runOnStitchThread(promise) {
+        stitchBase64Inputs(images, StitchOptions.from(options))
       }
     }
 
     AsyncFunction("stitchIncrementalBase64") {
-      existingPanorama: String?, newImage: String, options: Map<String, Any?> ->
-      val opts = StitchOptions.from(options)
-      val inputs = buildList {
-        if (!existingPanorama.isNullOrEmpty()) add(existingPanorama)
-        add(newImage)
+      existingPanorama: String?, newImage: String, options: Map<String, Any?>, promise: Promise ->
+      runOnStitchThread(promise) {
+        if (existingPanorama.isNullOrEmpty()) {
+          // First frame: nothing to stitch yet — the image itself is the seed panorama.
+          firstFrameResult(newImage)
+        } else {
+          stitchBase64Inputs(listOf(existingPanorama, newImage), StitchOptions.from(options))
+        }
       }
-      val paths = inputs.map { writeTempImage(it) }
-      try {
-        val result = stitchToFile(paths, opts)
-        fileToBase64(result)
-      } finally {
-        paths.forEach { runCatching { File(it).delete() } }
-      }
+    }
+
+    OnDestroy {
+      stitchExecutor.shutdown()
     }
   }
 
   // MARK: - Core
 
-  private fun stitchToFile(imagePaths: List<String>, opts: StitchOptions): Map<String, Any> {
-    if (!openCvReady) throw StitchException("OpenCV is not available on this device")
-    if (imagePaths.size < 2) throw StitchException("At least 2 images are required")
-
-    val images = ArrayList<Mat>(imagePaths.size)
-    try {
-      for (path in imagePaths) {
-        val mat = Imgcodecs.imread(path, Imgcodecs.IMREAD_COLOR)
-        if (mat.empty()) throw StitchException("Failed to read image: $path")
-        images.add(mat)
+  private fun runOnStitchThread(promise: Promise, block: () -> Map<String, Any>) {
+    stitchExecutor.execute {
+      try {
+        promise.resolve(block())
+      } catch (e: CodedException) {
+        promise.reject(e)
+      } catch (e: Throwable) {
+        promise.reject(StitchException(e.message ?: "Unknown native error"))
       }
-
-      val mode = if (opts.warpMode == "plane") Stitcher.SCANS else Stitcher.PANORAMA
-      val stitcher = Stitcher.create(mode)
-      stitcher.setPanoConfidenceThresh(opts.matchConf.toDouble())
-
-      val pano = Mat()
-      val status = stitcher.stitch(images, pano)
-      if (status != Stitcher.OK) {
-        pano.release()
-        throw StitchException(
-          "OpenCV stitch failed (status $status). Ensure 30-40% overlap between images."
-        )
-      }
-
-      if (opts.autoResize && opts.outputWidth > 0) {
-        val targetW = opts.outputWidth
-        val targetH = targetW / 2 // equirectangular 2:1
-        Imgproc.resize(pano, pano, Size(targetW.toDouble(), targetH.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
-      } else if (opts.outputWidth > 0 && pano.cols() > opts.outputWidth) {
-        val scale = opts.outputWidth.toDouble() / pano.cols()
-        Imgproc.resize(pano, pano, Size(), scale, scale, Imgproc.INTER_AREA)
-      }
-
-      val outPath = File(tempDir(), "panorama_${UUID.randomUUID()}.jpg").absolutePath
-      val params = MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, opts.jpegQuality)
-      val wrote = Imgcodecs.imwrite(outPath, pano, params)
-      val width = pano.cols()
-      val height = pano.rows()
-      pano.release()
-      if (!wrote) throw StitchException("Failed to write output JPEG")
-
-      return mapOf(
-        "success" to true,
-        "path" to outPath,
-        "width" to width,
-        "height" to height,
-        "aspectRatio" to if (height > 0) width.toDouble() / height else 0.0,
-        "errorMessage" to ""
-      )
-    } finally {
-      images.forEach { it.release() }
     }
   }
 
+  private fun emitProgress(progress: Double, stage: String) {
+    sendEvent("onStitchProgress", mapOf("progress" to progress, "stage" to stage))
+  }
+
+  private fun stitchBase64Inputs(images: List<String>, opts: StitchOptions): Map<String, Any> {
+    emitProgress(0.1, "decoding")
+    val paths = writeTempImages(images)
+    try {
+      emitProgress(0.3, "stitching")
+      val result = stitchToFile(paths, opts)
+      emitProgress(0.85, "encoding")
+      val encoded = fileToBase64(result)
+      emitProgress(1.0, "done")
+      return encoded
+    } finally {
+      cleanup(paths)
+    }
+  }
+
+  private fun stitchToFile(imagePaths: List<String>, opts: StitchOptions): Map<String, Any> {
+    if (!nativeReady) throw StitchException("OpenCV is not available on this device")
+    if (imagePaths.size < 2) throw StitchException("At least 2 images are required")
+
+    val outPath = File(tempDir(), "panorama_${UUID.randomUUID()}.jpg").absolutePath
+    val raw = PanoramaStitcherNative.nativeStitch(
+      imagePaths.toTypedArray(),
+      outPath,
+      opts.warpMode,
+      opts.blendStrength,
+      opts.matchConf,
+      opts.outputWidth,
+      opts.autoResize,
+      opts.jpegQuality
+    )
+
+    // Shim protocol: "ok|<width>|<height>" or "err|<message>".
+    if (!raw.startsWith("ok|")) {
+      throw StitchException(raw.removePrefix("err|"))
+    }
+    val parts = raw.split("|")
+    val width = parts[1].toInt()
+    val height = parts[2].toInt()
+
+    return mapOf(
+      "success" to true,
+      "path" to outPath,
+      "width" to width,
+      "height" to height,
+      "aspectRatio" to if (height > 0) width.toDouble() / height else 0.0,
+      "errorMessage" to ""
+    )
+  }
+
   private fun fileToBase64(result: Map<String, Any>): Map<String, Any> {
-    val path = result["path"] as String
-    val file = File(path)
+    val file = File(result["path"] as String)
     return try {
-      val bytes = file.readBytes()
+      val bytes = try {
+        file.readBytes()
+      } catch (e: Exception) {
+        // Same message as iOS for the same failure.
+        throw StitchException("Could not read stitched output")
+      }
       mapOf(
         "success" to true,
         "base64Image" to Base64.encodeToString(bytes, Base64.NO_WRAP),
@@ -150,21 +184,69 @@ class ExpoPanoramicStitcherModule : Module() {
     }
   }
 
+  /** First incremental frame: validate + measure, return it unchanged as the panorama. */
+  private fun firstFrameResult(newImage: String): Map<String, Any> {
+    val clean = stripDataUrl(newImage)
+    val bytes = decodeBase64(clean, index = 0)
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+      throw StitchException("Could not decode first image")
+    }
+    return mapOf(
+      "success" to true,
+      "base64Image" to clean,
+      "width" to bounds.outWidth,
+      "height" to bounds.outHeight,
+      "errorMessage" to ""
+    )
+  }
+
   // MARK: - Helpers
 
   private fun tempDir(): File {
-    val dir = File(appContext.reactContext?.cacheDir, "pano-stitch")
+    // appContext.cacheDirectory is non-null (unlike reactContext?.cacheDir).
+    val dir = File(appContext.cacheDirectory, "pano-stitch")
     if (!dir.exists()) dir.mkdirs()
     return dir
   }
 
-  /** Decode a base64 JPEG (data-URL prefix tolerated) to a temp file; returns its path. */
-  private fun writeTempImage(base64: String): String {
-    val clean = if (base64.contains(",")) base64.substringAfter(",") else base64
-    val bytes = Base64.decode(clean, Base64.DEFAULT)
-    val file = File(tempDir(), "in_${UUID.randomUUID()}.jpg")
-    file.writeBytes(bytes)
-    return file.absolutePath
+  private fun stripDataUrl(base64: String): String =
+    if (base64.contains(",")) base64.substringAfter(",") else base64
+
+  private fun decodeBase64(clean: String, index: Int): ByteArray = try {
+    Base64.decode(clean, Base64.DEFAULT)
+  } catch (e: IllegalArgumentException) {
+    throw StitchException("Invalid base64 at index $index")
+  }
+
+  /**
+   * Decode base64 JPEGs (data-URL prefix tolerated) to temp files; returns paths.
+   * Cleans up already-written files if a later input fails to decode.
+   */
+  private fun writeTempImages(base64Images: List<String>): List<String> {
+    val paths = mutableListOf<String>()
+    try {
+      base64Images.forEachIndexed { i, raw ->
+        val bytes = decodeBase64(stripDataUrl(raw), index = i)
+        val file = File(tempDir(), "in_${UUID.randomUUID()}.jpg")
+        try {
+          file.writeBytes(bytes)
+        } catch (e: Exception) {
+          // Keep the error coded and identical to iOS's.
+          throw StitchException("Failed to write temp image at index $i")
+        }
+        paths.add(file.absolutePath)
+      }
+    } catch (t: Throwable) {
+      cleanup(paths)
+      throw t
+    }
+    return paths
+  }
+
+  private fun cleanup(paths: List<String>) {
+    paths.forEach { runCatching { File(it).delete() } }
   }
 }
 

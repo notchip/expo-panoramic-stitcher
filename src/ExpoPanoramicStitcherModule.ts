@@ -1,6 +1,6 @@
 import { NativeModule, requireNativeModule } from "expo";
 
-import {
+import type {
   ExpoPanoramicStitcherModuleEvents,
   StitchBase64Result,
   StitchOptions,
@@ -23,7 +23,10 @@ declare class ExpoPanoramicStitcherModule extends NativeModule<ExpoPanoramicStit
     images: string[],
     options: StitchOptions,
   ): Promise<StitchBase64Result>;
-  /** Add one base64 image onto an existing base64 panorama (null/'' to start). */
+  /**
+   * Add one base64 image onto an existing base64 panorama. Pass null/'' to
+   * start — that first call passes the image through as the seed panorama.
+   */
   stitchIncrementalBase64(
     existingPanorama: string | null,
     newImage: string,

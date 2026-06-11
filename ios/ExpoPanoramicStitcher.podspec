@@ -10,9 +10,9 @@ Pod::Spec.new do |s|
   s.license        = package['license']
   s.author         = package['author']
   s.homepage       = package['homepage']
+  # iOS only: yeatse/opencv-spm ships no tvOS slice in its XCFramework.
   s.platforms      = {
-    :ios => '16.4',
-    :tvos => '16.4'
+    :ios => '16.4'
   }
   s.swift_version  = '5.9'
   s.source         = { git: '' }
@@ -23,8 +23,11 @@ Pod::Spec.new do |s|
   # OpenCV via Swift Package Manager — prebuilt XCFramework that tracks upstream
   # OpenCV releases (4.13.0+). Ships device + arm64-simulator slices, so NO manual
   # framework download and NO simulator EXCLUDED_ARCHS hack is needed.
-  # Requires CocoaPods >= 1.16 (spm_dependency) and platform >= 15.1.
-  s.spm_dependency(
+  # `spm_dependency` is a global helper from React Native's pod scripts
+  # (react_native_pods.rb, RN >= 0.75) — every Expo SDK 56 host Podfile loads it.
+  # It is NOT a CocoaPods API and must be called as a function with the spec as
+  # the first argument, not as a method on the spec.
+  spm_dependency(s,
     url: 'https://github.com/yeatse/opencv-spm.git',
     requirement: { kind: 'upToNextMajorVersion', minimumVersion: '4.13.0' },
     products: ['OpenCV']

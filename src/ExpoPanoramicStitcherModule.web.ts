@@ -1,6 +1,6 @@
 import { registerWebModule, NativeModule } from "expo";
 
-import {
+import type {
   ExpoPanoramicStitcherModuleEvents,
   StitchBase64Result,
   StitchResult,

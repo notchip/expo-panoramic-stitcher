@@ -34,6 +34,28 @@ android {
   defaultConfig {
     versionCode 1
     versionName "0.1.0"
+    externalNativeBuild {
+      cmake {
+        // Match the STL the OpenCV AAR was built with (prefab abi.json: c++_shared).
+        arguments "-DANDROID_STL=c++_shared"
+      }
+    }
+  }
+  buildFeatures {
+    // Consume the C++ headers + libopencv_java4.so exported by the OpenCV AAR.
+    prefab true
+  }
+  externalNativeBuild {
+    cmake {
+      path "CMakeLists.txt"
+    }
+  }
+  packagingOptions {
+    jniLibs {
+      // The OpenCV AAR already ships libc++_shared.so per ABI; excluding our copy
+      // avoids "2 files found" merge errors in consuming apps.
+      excludes += ["**/libc++_shared.so"]
+    }
   }
   lintOptions {
     abortOnError false
@@ -41,8 +63,10 @@ android {
 }
 
 dependencies {
-  // OpenCV from Maven Central (official, since 4.9). Pulls the Java/Kotlin API AND
-  // bundles the native .so libs into the APK automatically — no manual SDK download,
-  // no jniLibs.srcDirs, no CMake, no NDK config. This is the whole point.
+  // OpenCV from Maven Central (official, since 4.9). Bundles the native .so libs
+  // automatically — no manual SDK download, no jniLibs.srcDirs. NOTE: the AAR's
+  // Java/Kotlin bindings do NOT wrap the stitching module (upstream wraps it for
+  // Python only), so stitching goes through the small JNI shim in src/main/cpp/,
+  // compiled against the AAR's prefab C++ headers.
   implementation 'org.opencv:opencv:4.13.0'
 }

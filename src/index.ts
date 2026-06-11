@@ -1,4 +1,4 @@
-import {
+import type {
   StitchBase64Result,
   StitchOptions,
   StitchResult,
@@ -34,8 +34,9 @@ export function helloFromNative(name: string): string {
 /**
  * Stitch image files into a panorama, written to a JPEG on disk.
  * Lowest memory path — prefer this for large / many images.
+ * Failures reject the returned promise (including validation errors).
  */
-export function stitchImagePaths(
+export async function stitchImagePaths(
   imagePaths: string[],
   options?: StitchOptions,
 ): Promise<StitchResult> {
@@ -51,8 +52,9 @@ export function stitchImagePaths(
 /**
  * Stitch base64 JPEGs into a base64 JPEG panorama.
  * Returns the same payload shape on iOS and Android.
+ * Failures reject the returned promise (including validation errors).
  */
-export function stitchBase64(
+export async function stitchBase64(
   images: string[],
   options?: StitchOptions,
 ): Promise<StitchBase64Result> {
@@ -67,10 +69,11 @@ export function stitchBase64(
 
 /**
  * Build a panorama one image at a time.
- * Pass `null` (or '') as `existingPanorama` for the first image, then feed the
- * previous result's `base64Image` back in.
+ * Pass `null` (or '') as `existingPanorama` for the first image — that call is a
+ * pass-through that returns the image itself (with its dimensions) as the seed
+ * panorama. Feed each result's `base64Image` back in as `existingPanorama`.
  */
-export function stitchIncrementalBase64(
+export async function stitchIncrementalBase64(
   existingPanorama: string | null,
   newImage: string,
   options?: StitchOptions,

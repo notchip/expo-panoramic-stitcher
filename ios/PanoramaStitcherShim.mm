@@ -2,6 +2,9 @@
 //  PanoramaStitcherShim.mm
 //  Objective-C++ implementation. Wraps cv::Stitcher.
 //
+//  The stitch core below must stay logically identical to the Android JNI shim
+//  (android/src/main/cpp/panorama_stitcher_jni.cpp). Edit both together.
+//
 
 #import "PanoramaStitcherShim.h"
 
@@ -86,7 +89,23 @@ NSString *const PanoStitchErrorKey   = @"errorMessage";
 
     cv::Stitcher::Mode mode = [self modeForWarp:warpMode];
     cv::Ptr<cv::Stitcher> stitcher = cv::Stitcher::create(mode);
-    stitcher->setPanoConfidenceThresh(matchConf);
+
+    // matchConf = feature-match confidence. SCANS mode needs the affine matcher.
+    if (mode == cv::Stitcher::SCANS) {
+      stitcher->setFeaturesMatcher(
+          cv::makePtr<cv::detail::AffineBestOf2NearestMatcher>(false, false, matchConf));
+    } else {
+      stitcher->setFeaturesMatcher(
+          cv::makePtr<cv::detail::BestOf2NearestMatcher>(false, matchConf));
+    }
+
+    // blendStrength 1-10 = number of multiband blending bands.
+    int bands = (int)MIN(MAX(blendStrength, 1), 10);
+    stitcher->setBlender(cv::makePtr<cv::detail::MultiBandBlender>(false, bands));
+
+    if ([warpMode isEqualToString:@"cylindrical"]) {
+      stitcher->setWarper(cv::makePtr<cv::CylindricalWarper>());
+    }
 
     cv::Mat pano;
     cv::Stitcher::Status status = stitcher->stitch(images, pano);
@@ -116,6 +135,8 @@ NSString *const PanoStitchErrorKey   = @"errorMessage";
     };
   } catch (const cv::Exception &e) {
     return [self resultWithError:[NSString stringWithFormat:@"OpenCV exception: %s", e.what()]];
+  } catch (const std::exception &e) {
+    return [self resultWithError:[NSString stringWithFormat:@"Native exception: %s", e.what()]];
   } catch (...) {
     return [self resultWithError:@"Unknown native exception during stitching"];
   }

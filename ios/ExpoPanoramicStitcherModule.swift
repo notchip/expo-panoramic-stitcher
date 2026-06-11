@@ -1,10 +1,16 @@
+import CoreGraphics
 import ExpoModulesCore
 import Foundation
+import ImageIO
 
 // PanoramaStitcherShim (Objective-C++) is exposed to Swift through the pod's
 // auto-generated umbrella header — no manual bridging header required.
 
 public class ExpoPanoramicStitcherModule: Module {
+  // Dedicated serial queue so multi-second OpenCV work never blocks the
+  // process-wide queue shared by every Expo module's AsyncFunctions.
+  private static let stitchQueue = DispatchQueue(label: "expo.panoramicstitcher.stitch", qos: .userInitiated)
+
   public func definition() -> ModuleDefinition {
     Name("ExpoPanoramicStitcher")
 
@@ -19,29 +25,43 @@ public class ExpoPanoramicStitcherModule: Module {
     }
 
     AsyncFunction("stitchImagePaths") { (imagePaths: [String], options: StitchOptions) -> StitchResult in
-      return try Self.stitchPaths(imagePaths, options: options)
-    }
+      self.progress(0.3, "stitching")
+      let out = try Self.stitchPaths(imagePaths, options: options)
+      self.progress(1.0, "done")
+      return out
+    }.runOnQueue(Self.stitchQueue)
 
     AsyncFunction("stitchBase64") { (images: [String], options: StitchOptions) -> StitchBase64Result in
-      let paths = try Self.writeTempImages(images)
-      defer { Self.cleanup(paths) }
-      let out = try Self.stitchPaths(paths, options: options)
-      return try Self.toBase64(out, options: options)
-    }
+      return try self.stitchBase64Inputs(images, options: options)
+    }.runOnQueue(Self.stitchQueue)
 
     AsyncFunction("stitchIncrementalBase64") {
       (existingPanorama: String?, newImage: String, options: StitchOptions) -> StitchBase64Result in
-      var inputs: [String] = []
-      if let existing = existingPanorama, !existing.isEmpty { inputs.append(existing) }
-      inputs.append(newImage)
-      let paths = try Self.writeTempImages(inputs)
-      defer { Self.cleanup(paths) }
-      let out = try Self.stitchPaths(paths, options: options)
-      return try Self.toBase64(out, options: options)
-    }
+      guard let existing = existingPanorama, !existing.isEmpty else {
+        // First frame: nothing to stitch yet — the image itself is the seed panorama.
+        return try Self.firstFrameResult(newImage)
+      }
+      return try self.stitchBase64Inputs([existing, newImage], options: options)
+    }.runOnQueue(Self.stitchQueue)
   }
 
   // MARK: - Core
+
+  private func progress(_ value: Double, _ stage: String) {
+    sendEvent("onStitchProgress", ["progress": value, "stage": stage])
+  }
+
+  private func stitchBase64Inputs(_ images: [String], options: StitchOptions) throws -> StitchBase64Result {
+    progress(0.1, "decoding")
+    let paths = try Self.writeTempImages(images)
+    defer { Self.cleanup(paths) }
+    progress(0.3, "stitching")
+    let out = try Self.stitchPaths(paths, options: options)
+    progress(0.85, "encoding")
+    let result = try Self.toBase64(out)
+    progress(1.0, "done")
+    return result
+  }
 
   private static func stitchPaths(_ imagePaths: [String], options: StitchOptions) throws -> StitchResult {
     let outputURL = tempDir().appendingPathComponent("panorama_\(UUID().uuidString).jpg")
@@ -76,7 +96,7 @@ public class ExpoPanoramicStitcherModule: Module {
     )
   }
 
-  private static func toBase64(_ result: StitchResult, options: StitchOptions) throws -> StitchBase64Result {
+  private static func toBase64(_ result: StitchResult) throws -> StitchBase64Result {
     let url = URL(fileURLWithPath: result.path)
     defer { try? FileManager.default.removeItem(at: url) }
     guard let data = try? Data(contentsOf: url) else {
@@ -91,6 +111,29 @@ public class ExpoPanoramicStitcherModule: Module {
     )
   }
 
+  /// First incremental frame: validate + measure, return it unchanged as the panorama.
+  private static func firstFrameResult(_ newImage: String) throws -> StitchBase64Result {
+    let clean = stripDataUrl(newImage)
+    guard let data = Data(base64Encoded: clean, options: .ignoreUnknownCharacters) else {
+      throw Exception(name: "StitchError", description: "Invalid base64 at index 0")
+    }
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+      let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+      let width = props[kCGImagePropertyPixelWidth] as? Int,
+      let height = props[kCGImagePropertyPixelHeight] as? Int,
+      width > 0, height > 0
+    else {
+      throw Exception(name: "StitchError", description: "Could not decode first image")
+    }
+    return StitchBase64Result(
+      success: true,
+      base64Image: clean,
+      width: width,
+      height: height,
+      errorMessage: ""
+    )
+  }
+
   // MARK: - Helpers
 
   private static func tempDir() -> URL {
@@ -99,17 +142,37 @@ public class ExpoPanoramicStitcherModule: Module {
     return dir
   }
 
+  // Everything after the FIRST comma (possibly empty) — must match Kotlin's
+  // substringAfter(",") so malformed data-URLs fail identically on both platforms.
+  private static func stripDataUrl(_ base64: String) -> String {
+    guard let comma = base64.firstIndex(of: ",") else {
+      return base64
+    }
+    return String(base64[base64.index(after: comma)...])
+  }
+
   /// Decode base64 JPEGs (data-URL prefix tolerated) to temp files; returns paths.
+  /// Cleans up already-written files if a later input fails to decode.
   private static func writeTempImages(_ base64Images: [String]) throws -> [String] {
     var paths: [String] = []
-    for (i, raw) in base64Images.enumerated() {
-      let clean = raw.contains(",") ? String(raw.split(separator: ",").last ?? "") : raw
-      guard let data = Data(base64Encoded: clean, options: .ignoreUnknownCharacters) else {
-        throw Exception(name: "StitchError", description: "Invalid base64 at index \(i)")
+    do {
+      for (i, raw) in base64Images.enumerated() {
+        let clean = stripDataUrl(raw)
+        guard let data = Data(base64Encoded: clean, options: .ignoreUnknownCharacters) else {
+          throw Exception(name: "StitchError", description: "Invalid base64 at index \(i)")
+        }
+        let url = tempDir().appendingPathComponent("in_\(UUID().uuidString).jpg")
+        do {
+          try data.write(to: url)
+        } catch {
+          // Keep the error coded (ERR_STITCH) and identical to Android's.
+          throw Exception(name: "StitchError", description: "Failed to write temp image at index \(i)")
+        }
+        paths.append(url.path)
       }
-      let url = tempDir().appendingPathComponent("in_\(UUID().uuidString).jpg")
-      try data.write(to: url)
-      paths.append(url.path)
+    } catch {
+      cleanup(paths)
+      throw error
     }
     return paths
   }
