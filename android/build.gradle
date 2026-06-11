@@ -2,7 +2,7 @@ apply plugin: 'com.android.library'
 apply plugin: 'org.jetbrains.kotlin.android'
 
 group = 'expo.modules.panoramicstitcher'
-version = '0.1.0'
+version = '0.2.0'
 
 def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
 apply from: expoModulesCorePlugin
@@ -32,8 +32,8 @@ if (useManagedAndroidSdkVersions) {
 android {
   namespace "expo.modules.panoramicstitcher"
   defaultConfig {
-    versionCode 1
-    versionName "0.1.0"
+    versionCode 2
+    versionName "0.2.0"
     externalNativeBuild {
       cmake {
         // Match the STL the OpenCV AAR was built with (prefab abi.json: c++_shared).
