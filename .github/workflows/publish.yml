@@ -1,0 +1,65 @@
+name: Publish
+
+# Publishes to npmjs + GitHub Packages on push to main, but only when the
+# version in package.json is not yet on that registry. Bump the version,
+# push, and both registries update; push without a bump and this is a no-op.
+#
+# Requires the NPM_TOKEN repository secret (npmjs automation token).
+# GitHub Packages uses the built-in GITHUB_TOKEN.
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      # The repo .npmrc resolves these for auth on both registries.
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      GIT_PAT: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Decide what needs publishing
+        id: check
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if npm view "$NAME@$VERSION" version --registry https://registry.npmjs.org >/dev/null 2>&1; then
+            echo "npmjs=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "npmjs=true" >> "$GITHUB_OUTPUT"
+          fi
+          if npm view "$NAME@$VERSION" version --registry https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "ghp=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ghp=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npmjs
+        if: steps.check.outputs.npmjs == 'true'
+        run: npm publish --access public --@notchip:registry=https://registry.npmjs.org
+
+      - name: Publish to GitHub Packages
+        if: steps.check.outputs.ghp == 'true'
+        run: npm publish --@notchip:registry=https://npm.pkg.github.com
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+          NPMJS: ${{ steps.check.outputs.npmjs }}
+          GHP: ${{ steps.check.outputs.ghp }}
+        run: |
+          echo "version $VERSION: npmjs published=$NPMJS, github packages published=$GHP" >> "$GITHUB_STEP_SUMMARY"
