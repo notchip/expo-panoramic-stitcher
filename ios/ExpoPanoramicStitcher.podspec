@@ -20,18 +20,20 @@ Pod::Spec.new do |s|
 
   s.dependency 'ExpoModulesCore'
 
-  # OpenCV via Swift Package Manager — prebuilt XCFramework that tracks upstream
-  # OpenCV releases (4.13.0+). Ships device + arm64-simulator slices, so NO manual
-  # framework download and NO simulator EXCLUDED_ARCHS hack is needed.
-  # `spm_dependency` is a global helper from React Native's pod scripts
-  # (react_native_pods.rb, RN >= 0.75) — every Expo SDK 56 host Podfile loads it.
-  # It is NOT a CocoaPods API and must be called as a function with the spec as
-  # the first argument, not as a method on the spec.
-  spm_dependency(s,
-    url: 'https://github.com/yeatse/opencv-spm.git',
-    requirement: { kind: 'upToNextMajorVersion', minimumVersion: '4.13.0' },
-    products: ['OpenCV']
-  )
+  # OpenCV as a VENDORED xcframework (downloaded by this package's npm
+  # postinstall script, scripts/download-opencv-ios.js — not checked in, not
+  # shipped in the npm tarball). Do NOT go back to `spm_dependency` on
+  # yeatse/opencv-spm: an SPM product attaches to the POD target only, so when
+  # the consumer uses CocoaPods static frameworks (Expo default via
+  # expo-build-properties ios.useFrameworks "static") the pod's archive holds
+  # just the shim's objects — a static framework cannot merge another static
+  # library — and nothing puts opencv2 on the APP's link line. The app link
+  # then fails with every cv:: symbol undefined. `vendored_frameworks` is the
+  # fix precisely because CocoaPods propagates `-framework "opencv2"` plus the
+  # framework search path into the consuming app's xcconfig.
+  # The xcframework ships ios-arm64 device + arm64/x86_64 simulator slices,
+  # so no EXCLUDED_ARCHS hack is needed.
+  s.vendored_frameworks = 'opencv2.xcframework'
 
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',

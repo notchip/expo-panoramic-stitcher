@@ -5,16 +5,17 @@
 
 > **No manual OpenCV download.** Android auto-downloads the official OpenCV
 > Android SDK on first build (Gradle does it, once, into a shared cache) and
-> statically links the stitching modules; iOS pulls a prebuilt OpenCV
-> XCFramework via Swift Package Manager. No vendored `opencv2.framework`, no
-> hand-wired `OpenCV-android-sdk/`, no simulator arch hacks.
+> statically links the stitching modules; iOS auto-downloads a prebuilt
+> `opencv2.xcframework` once at `npm install` (postinstall script) and vendors
+> it into the pod. No hand-wired `OpenCV-android-sdk/`, no simulator arch
+> hacks.
 
 ## How this avoids the old OpenCV pain
 
 | | Old way (manual) | This module |
 |---|---|---|
 | Android OpenCV | download `OpenCV-android-sdk`, wire `jniLibs.srcDirs`, hand-roll CMake + JNI | Gradle downloads the official `opencv-4.13.0-android-sdk.zip` once (~303 MB, SHA-256-verified) into the Gradle user-home cache and statically links `libopencv_stitching.a` + friends into the one ~150-line JNI shim. (The Maven `org.opencv:opencv` AAR is not usable: its `libopencv_java4.so` does not compile in the stitching module at all.) |
-| iOS OpenCV | download `opencv2.framework`, vendor it, fight Apple-Silicon simulator arches (`withOpenCVSimulatorFix.js`) | SPM dependency on `yeatse/opencv-spm` XCFramework (device + arm64-sim slices). No vendoring, no arch hack. |
+| iOS OpenCV | download `opencv2.framework`, vendor it by hand, fight Apple-Silicon simulator arches (`withOpenCVSimulatorFix.js`) | `npm install` fetches the `yeatse/opencv-spm` prebuilt `opencv2.xcframework` (~191 MB zip, SHA-256-verified, device + arm64-sim slices) once into the package's `ios/` dir; the podspec vendors it (`vendored_frameworks`). No manual step, no arch hack — and it links under **static frameworks**, which the previous SPM approach did not (an SPM product attaches to the pod target only and never reaches the app's link line when the pod is a static framework). |
 | iOS bridge | Swift → ObjC++ `Bridge.mm` → C++ `.mm` (two layers) | Swift → one thin `PanoramaStitcherShim.mm` (~140 lines, file-IO via OpenCV, no UIKit) |
 | Result payload | iOS returned base64, Android returned RGBA bytes (asymmetric) | identical `StitchBase64Result` on both platforms |
 
@@ -34,16 +35,26 @@ npx expo prebuild --clean
 ```
 
 Requirements: Expo SDK 56+ (React Native 0.85+), iOS 16.4+, Xcode 26.4+,
-Android minSdk 24. First iOS `pod install` resolves the OpenCV Swift package
-(downloads the XCFramework once, then cached). The **first Android build**
+Android minSdk 24. **`npm install` (postinstall, macOS only)** downloads the
+prebuilt `opencv2.xcframework` once (~191 MB zip, SHA-256-verified) into this
+package's `ios/` directory, where the podspec vendors it — rerun manually with
+`node node_modules/@notchip/expo-panoramic-stitcher/scripts/download-opencv-ios.js`
+if the install was interrupted (offline installs: point
+`EXPO_PANORAMIC_STITCHER_OPENCV_ZIP` at a pre-downloaded zip). The **first
+Android build**
 downloads the official OpenCV 4.13.0 Android SDK zip once (~303 MB,
 SHA-256-verified) into the Gradle user-home cache
 (`~/.gradle/caches/opencv-android-sdk/4.13.0`); every later build — and every
 other project on the machine — reuses it, and `clean` does not evict it.
 
-> `spm_dependency` in the podspec is provided by React Native's pod helpers
-> (RN ≥ 0.75), which every Expo host Podfile loads. It is **not** a CocoaPods
-> feature — linting the podspec standalone (`pod spec lint`) will not resolve it.
+> Why not SPM? Versions ≤ 0.3.x pulled OpenCV via `spm_dependency` — that
+> compiles, but with CocoaPods **static frameworks** (the Expo default via
+> `expo-build-properties` `ios.useFrameworks: "static"`, mandatory for
+> Firebase-using apps) the SPM product never reaches the app's link line and
+> every `cv::` symbol comes up undefined at the final app link. A vendored
+> framework is propagated by CocoaPods into the app's xcconfig
+> (`-framework "opencv2"` + search paths), which is exactly what static
+> linkage needs.
 
 ## Usage
 
@@ -97,7 +108,7 @@ on iOS/Android; only the web stub resolves with `success: false`.
 JS / TS  (index.ts — defaults, validation, typed API)
    │  requireNativeModule('ExpoPanoramicStitcher')
    ├── iOS:   ExpoPanoramicStitcherModule.swift   (base64 ↔ temp file, own dispatch queue)
-   │            └─ PanoramaStitcherShim.mm  → cv::Stitcher  (OpenCV via SPM)
+   │            └─ PanoramaStitcherShim.mm  → cv::Stitcher  (vendored opencv2.xcframework)
    └── Android: ExpoPanoramicStitcherModule.kt    (base64 ↔ temp file, own thread)
                 └─ panorama_stitcher_jni.cpp → cv::Stitcher  (OpenCV Android SDK, static libs)
 ```
@@ -123,8 +134,9 @@ async functions.
 - Base64 strictness differs slightly outside the contract: Android rejects
   URL-safe/polluted base64 (`Invalid base64 at index N`), iOS skips unknown
   characters and fails later. Send standard base64 (data-URL prefix is fine).
-- If your app uses `use_frameworks! :linkage => :static`, verify the OpenCV
-  XCFramework links cleanly.
+- CocoaPods **static frameworks are supported** (`use_frameworks! :linkage =>
+  :static` / expo-build-properties `ios.useFrameworks: "static"`) — that
+  configuration is the reason OpenCV is vendored rather than pulled via SPM.
 - iOS only (no tvOS): the prebuilt OpenCV XCFramework has no tvOS slice.
 - **EAS iOS builds with Expo SDK 57 precompiled binaries** need an Xcode whose
   Swift matches those binaries — e.g. the `macos-tahoe-26.4-xcode-26.4` EAS

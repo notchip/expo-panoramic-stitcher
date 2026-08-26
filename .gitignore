@@ -151,3 +151,10 @@ build/
 CLAUDE.md
 # Android gradle cache (accidentally committed earlier)
 android/.gradle/
+
+# Vendored OpenCV xcframework — fetched by scripts/download-opencv-ios.js at
+# npm postinstall; never commit or ship it.
+ios/opencv2.xcframework/
+ios/.opencv2.xcframework.version
+ios/.opencv2.xcframework.zip.partial
+ios/.opencv2.xcframework.extract.tmp/

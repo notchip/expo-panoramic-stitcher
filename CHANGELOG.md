@@ -3,6 +3,36 @@
 Notable changes to `@notchip/expo-panoramic-stitcher`. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.4.0] — 2026-08-26
+
+### Fixed
+
+- **iOS:** the app-level link failed with every `cv::` symbol undefined when
+  the consumer used CocoaPods **static frameworks** (the Expo default via
+  `expo-build-properties` `ios.useFrameworks: "static"`). Root cause: the
+  podspec's `spm_dependency` attached the OpenCV Swift-package product to the
+  pod target only — a static framework cannot merge another static library,
+  so nothing put `opencv2` on the app's link line (CocoaPods even warned:
+  *"Pod ExpoPanoramicStitcher is using swift package(s) OpenCV with static
+  linking, this might cause linker errors"*).
+
+### Changed
+
+- **iOS packaging:** OpenCV is now a **vendored `opencv2.xcframework`**
+  (`s.vendored_frameworks`) instead of an SPM dependency, so CocoaPods
+  propagates `-framework "opencv2"` + the framework search path into the
+  consuming app's xcconfig under both static and dynamic linkage. The
+  framework (yeatse/opencv-spm 4.13.0 build, ~191 MB zip, SHA-256-verified,
+  `ios-arm64` device + `arm64/x86_64` simulator slices) is downloaded once by
+  a dependency-free **npm `postinstall`** script into the package's `ios/`
+  dir — not by a CocoaPods `prepare_command`, which never runs for the
+  `:path` pods Expo autolinking generates. The script skips non-macOS
+  platforms, is rerunnable manually
+  (`node scripts/download-opencv-ios.js`), and honors
+  `EXPO_PANORAMIC_STITCHER_OPENCV_ZIP` for offline installs. The xcframework
+  is neither committed nor shipped in the npm tarball.
+- Android is unchanged from 0.3.0.
+
 ## [0.3.0] — 2026-08-26
 
 ### Fixed
