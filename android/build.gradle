@@ -2,7 +2,7 @@ apply plugin: 'com.android.library'
 apply plugin: 'org.jetbrains.kotlin.android'
 
 group = 'expo.modules.panoramicstitcher'
-version = '0.2.0'
+version = '0.3.0'
 
 def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
 apply from: expoModulesCorePlugin
@@ -29,21 +29,175 @@ if (useManagedAndroidSdkVersions) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// OpenCV Android SDK (static libraries).
+//
+// The Maven org.opencv:opencv AAR does NOT compile the stitching module into
+// libopencv_java4.so (cv::Stitcher, cv::detail::* are undefined at link) and
+// ships no Java Stitcher bindings, so the JNI shim links the static libs from
+// the official OpenCV Android SDK instead. The SDK zip is downloaded ONCE
+// into a shared cache under the Gradle user home — surviving `clean` and
+// shared across projects — verified against a pinned SHA-256, unpacked, and
+// its path handed to CMake via -DOPENCV_ANDROID_SDK.
+// ---------------------------------------------------------------------------
+def opencvVersion = '4.13.0'
+def opencvSdkUrl = "https://github.com/opencv/opencv/releases/download/${opencvVersion}/opencv-${opencvVersion}-android-sdk.zip"
+// SHA-256 of opencv-4.13.0-android-sdk.zip (318,235,406 bytes), measured from
+// the official GitHub release asset.
+def opencvSdkSha256 = 'edfda20fdf65d0bd45391d168ec5261dd30b600b00279c4d910d7f1c3e020f0f'
+def opencvCacheDir = new File(project.gradle.gradleUserHomeDir, "caches/opencv-android-sdk/${opencvVersion}")
+def opencvSdkRoot = new File(opencvCacheDir, 'OpenCV-android-sdk')
+def opencvUnpackMarker = new File(opencvCacheDir, ".unpacked-${opencvVersion}.ok")
+
+def downloadOpenCVSdk = tasks.register('downloadOpenCVAndroidSdk') {
+  description = "Downloads and unpacks the OpenCV ${opencvVersion} Android SDK into ${opencvCacheDir}"
+
+  // Capture plain values so the action never touches `project`/`gradle` at
+  // execution time (configuration-cache friendly).
+  def sdkVersion = opencvVersion
+  def url = opencvSdkUrl
+  def expectedSha256 = opencvSdkSha256
+  def cacheDir = opencvCacheDir
+  def sdkRoot = opencvSdkRoot
+  def marker = opencvUnpackMarker
+  def includeProbe = new File(sdkRoot, 'sdk/native/jni/include/opencv2/opencv.hpp')
+  def staticlibsProbe = new File(sdkRoot, 'sdk/native/staticlibs')
+
+  outputs.upToDateWhen { marker.exists() && includeProbe.exists() && staticlibsProbe.isDirectory() }
+
+  doLast {
+    if (marker.exists() && includeProbe.exists() && staticlibsProbe.isDirectory()) {
+      return
+    }
+
+    cacheDir.mkdirs()
+    def zipFile = new File(cacheDir, "opencv-${sdkVersion}-android-sdk.zip")
+
+    def sha256Of = { File f ->
+      def md = java.security.MessageDigest.getInstance('SHA-256')
+      f.withInputStream { stream ->
+        byte[] buf = new byte[1 << 16]
+        int n
+        while ((n = stream.read(buf)) > 0) {
+          md.update(buf, 0, n)
+        }
+      }
+      new BigInteger(1, md.digest()).toString(16).padLeft(64, '0')
+    }
+
+    def downloadTo = { File dest ->
+      def part = new File(dest.parentFile, dest.name + '.part')
+      part.delete()
+      def conn = new URL(url).openConnection() as HttpURLConnection
+      conn.instanceFollowRedirects = true // GitHub 302s to objects.githubusercontent.com (https->https, followed)
+      conn.connectTimeout = 60000
+      conn.readTimeout = 300000
+      try {
+        if (conn.responseCode != 200) {
+          throw new GradleException("Downloading OpenCV Android SDK failed: HTTP ${conn.responseCode} from ${url}")
+        }
+        part.withOutputStream { out ->
+          conn.inputStream.withStream { stream -> out << stream }
+        }
+      } finally {
+        conn.disconnect()
+      }
+      dest.delete()
+      if (!part.renameTo(dest)) {
+        throw new GradleException("Could not move ${part} to ${dest}")
+      }
+    }
+
+    // Obtain a hash-verified zip, tolerating a corrupt/partial leftover from
+    // an earlier interrupted build: bad hash -> delete and re-download once.
+    def haveVerifiedZip = false
+    def lastProblem = null
+    for (attempt in 1..2) {
+      try {
+        if (!zipFile.exists()) {
+          logger.lifecycle("Downloading OpenCV ${url} (~303 MB, one-time; cached in ${cacheDir}) ...")
+          downloadTo(zipFile)
+        }
+      } catch (IOException e) {
+        lastProblem = "download failed: ${e.message}"
+        logger.warn("OpenCV Android SDK ${lastProblem}" + (attempt == 1 ? '; retrying.' : '.'))
+        continue
+      }
+      def actual = sha256Of(zipFile)
+      if (actual == expectedSha256) {
+        haveVerifiedZip = true
+        break
+      }
+      lastProblem = "SHA-256 verification failed (expected ${expectedSha256}, got ${actual})"
+      logger.warn("OpenCV Android SDK zip ${lastProblem}; deleting ${zipFile}" + (attempt == 1 ? ' and re-downloading.' : '.'))
+      zipFile.delete()
+    }
+    if (!haveVerifiedZip) {
+      throw new GradleException("Could not obtain a verified OpenCV Android SDK zip after 2 attempts (last problem: ${lastProblem}). Check your network/proxy and retry; the file is ${url}")
+    }
+
+    // Unpack (the zip's single top-level directory is OpenCV-android-sdk/).
+    // Remove any partial unpack from an interrupted build first — the marker
+    // file is only written after a fully successful extraction.
+    logger.lifecycle("Unpacking OpenCV Android SDK into ${cacheDir} ...")
+    marker.delete()
+    if (sdkRoot.exists()) {
+      sdkRoot.deleteDir()
+    }
+    def canonicalDest = cacheDir.canonicalPath + File.separator
+    new java.util.zip.ZipFile(zipFile).withCloseable { zf ->
+      zf.entries().each { entry ->
+        def outFile = new File(cacheDir, entry.name)
+        if (!outFile.canonicalPath.startsWith(canonicalDest)) {
+          throw new GradleException("Refusing to unpack zip entry outside the cache dir: ${entry.name}")
+        }
+        if (entry.isDirectory()) {
+          outFile.mkdirs()
+        } else {
+          outFile.parentFile.mkdirs()
+          outFile.withOutputStream { out ->
+            zf.getInputStream(entry).withStream { stream -> out << stream }
+          }
+        }
+      }
+    }
+    if (!includeProbe.exists() || !staticlibsProbe.isDirectory()) {
+      throw new GradleException("Unpacked OpenCV Android SDK at ${sdkRoot} is missing expected contents (${includeProbe} / ${staticlibsProbe}); delete ${cacheDir} and retry.")
+    }
+    marker.text = expectedSha256
+    // The unpacked SDK is what builds consume; drop the zip to save disk.
+    zipFile.delete()
+    logger.lifecycle("OpenCV Android SDK ready at ${sdkRoot}")
+  }
+}
+
+// The unpacked SDK must exist before AGP configures/runs CMake for any
+// variant/ABI. preBuild alone is not sufficient on all AGP task graphs, so
+// also hook every external-native-build task as it is added.
+tasks.whenTaskAdded { task ->
+  if (task.name == 'preBuild'
+      || task.name.startsWith('configureCMake')
+      || task.name.startsWith('buildCMake')
+      || (task.name.startsWith('externalNativeBuild') && !task.name.startsWith('externalNativeBuildClean'))
+      || task.name.startsWith('generateJsonModel')) {
+    task.dependsOn(downloadOpenCVSdk)
+  }
+}
+
 android {
   namespace "expo.modules.panoramicstitcher"
   defaultConfig {
-    versionCode 2
-    versionName "0.2.0"
+    versionCode 3
+    versionName "0.3.0"
     externalNativeBuild {
       cmake {
-        // Match the STL the OpenCV AAR was built with (prefab abi.json: c++_shared).
-        arguments "-DANDROID_STL=c++_shared"
+        // c++_shared: React Native apps already use the shared C++ runtime,
+        // and the OpenCV static libs target the same libc++ ABI.
+        // Forward slashes: CMake mis-parses backslashes in Windows paths.
+        arguments "-DANDROID_STL=c++_shared",
+                  "-DOPENCV_ANDROID_SDK=${opencvSdkRoot.absolutePath.replace('\\', '/')}"
       }
     }
-  }
-  buildFeatures {
-    // Consume the C++ headers + libopencv_java4.so exported by the OpenCV AAR.
-    prefab true
   }
   externalNativeBuild {
     cmake {
@@ -52,7 +206,8 @@ android {
   }
   packagingOptions {
     jniLibs {
-      // The OpenCV AAR already ships libc++_shared.so per ABI; excluding our copy
+      // The consuming RN/Expo app always packages libc++_shared.so itself
+      // (React Native's own native libraries use it); excluding our copy
       // avoids "2 files found" merge errors in consuming apps.
       excludes += ["**/libc++_shared.so"]
     }
@@ -60,13 +215,4 @@ android {
   lintOptions {
     abortOnError false
   }
-}
-
-dependencies {
-  // OpenCV from Maven Central (official, since 4.9). Bundles the native .so libs
-  // automatically — no manual SDK download, no jniLibs.srcDirs. NOTE: the AAR's
-  // Java/Kotlin bindings do NOT wrap the stitching module (upstream wraps it for
-  // Python only), so stitching goes through the small JNI shim in src/main/cpp/,
-  // compiled against the AAR's prefab C++ headers.
-  implementation 'org.opencv:opencv:4.13.0'
 }

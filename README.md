@@ -1,26 +1,30 @@
 # @notchip/expo-panoramic-stitcher
 
-360° / wide panorama image stitching for **Expo SDK 56** (RN 0.85), written in
+360° / wide panorama image stitching for **Expo SDK 56+** (RN 0.85+), written in
 **Swift + Kotlin** with the Expo Modules API, powered by **OpenCV 4.13**.
 
-> **No manual OpenCV download.** Android pulls OpenCV from Maven Central; iOS pulls
-> a prebuilt OpenCV XCFramework via Swift Package Manager. No vendored
-> `opencv2.framework`, no `OpenCV-android-sdk/`, no simulator arch hacks.
+> **No manual OpenCV download.** Android auto-downloads the official OpenCV
+> Android SDK on first build (Gradle does it, once, into a shared cache) and
+> statically links the stitching modules; iOS pulls a prebuilt OpenCV
+> XCFramework via Swift Package Manager. No vendored `opencv2.framework`, no
+> hand-wired `OpenCV-android-sdk/`, no simulator arch hacks.
 
 ## How this avoids the old OpenCV pain
 
 | | Old way (manual) | This module |
 |---|---|---|
-| Android OpenCV | download `OpenCV-android-sdk`, wire `jniLibs.srcDirs`, hand-roll CMake + JNI | `implementation 'org.opencv:opencv:4.13.0'` — native libs auto-bundled. One ~150-line JNI shim compiled against the AAR's prefab headers (the AAR's Java API does not cover the stitching module). |
+| Android OpenCV | download `OpenCV-android-sdk`, wire `jniLibs.srcDirs`, hand-roll CMake + JNI | Gradle downloads the official `opencv-4.13.0-android-sdk.zip` once (~303 MB, SHA-256-verified) into the Gradle user-home cache and statically links `libopencv_stitching.a` + friends into the one ~150-line JNI shim. (The Maven `org.opencv:opencv` AAR is not usable: its `libopencv_java4.so` does not compile in the stitching module at all.) |
 | iOS OpenCV | download `opencv2.framework`, vendor it, fight Apple-Silicon simulator arches (`withOpenCVSimulatorFix.js`) | SPM dependency on `yeatse/opencv-spm` XCFramework (device + arm64-sim slices). No vendoring, no arch hack. |
 | iOS bridge | Swift → ObjC++ `Bridge.mm` → C++ `.mm` (two layers) | Swift → one thin `PanoramaStitcherShim.mm` (~140 lines, file-IO via OpenCV, no UIKit) |
 | Result payload | iOS returned base64, Android returned RGBA bytes (asymmetric) | identical `StitchBase64Result` on both platforms |
 
 OpenCV is a C++ library, so each platform keeps exactly **one** small C++ shim:
 `PanoramaStitcherShim.mm` on iOS, `panorama_stitcher_jni.cpp` on Android. The two
-contain the same stitch core and must be edited together. (The Maven AAR's
-Java/Kotlin bindings do not wrap OpenCV's stitching module — upstream wraps it
-for Python only — which is why Android needs the JNI shim.)
+contain the same stitch core and must be edited together. (OpenCV ships no
+Java/Kotlin bindings for the stitching module — upstream wraps it for Python
+only — and the Maven AAR's `libopencv_java4.so` does not even compile the
+stitching module in, which is why Android links the official SDK's static
+libraries through the JNI shim.)
 
 ## Install (into an Expo app)
 
@@ -31,7 +35,11 @@ npx expo prebuild --clean
 
 Requirements: Expo SDK 56+ (React Native 0.85+), iOS 16.4+, Xcode 26.4+,
 Android minSdk 24. First iOS `pod install` resolves the OpenCV Swift package
-(downloads the XCFramework once, then cached).
+(downloads the XCFramework once, then cached). The **first Android build**
+downloads the official OpenCV 4.13.0 Android SDK zip once (~303 MB,
+SHA-256-verified) into the Gradle user-home cache
+(`~/.gradle/caches/opencv-android-sdk/4.13.0`); every later build — and every
+other project on the machine — reuses it, and `clean` does not evict it.
 
 > `spm_dependency` in the podspec is provided by React Native's pod helpers
 > (RN ≥ 0.75), which every Expo host Podfile loads. It is **not** a CocoaPods
@@ -91,7 +99,7 @@ JS / TS  (index.ts — defaults, validation, typed API)
    ├── iOS:   ExpoPanoramicStitcherModule.swift   (base64 ↔ temp file, own dispatch queue)
    │            └─ PanoramaStitcherShim.mm  → cv::Stitcher  (OpenCV via SPM)
    └── Android: ExpoPanoramicStitcherModule.kt    (base64 ↔ temp file, own thread)
-                └─ panorama_stitcher_jni.cpp → cv::Stitcher  (OpenCV via Maven, prefab headers)
+                └─ panorama_stitcher_jni.cpp → cv::Stitcher  (OpenCV Android SDK, static libs)
 ```
 
 Both platforms share one contract: the C++ shims work on **image file paths**
@@ -118,4 +126,16 @@ async functions.
 - If your app uses `use_frameworks! :linkage => :static`, verify the OpenCV
   XCFramework links cleanly.
 - iOS only (no tvOS): the prebuilt OpenCV XCFramework has no tvOS slice.
+- **EAS iOS builds with Expo SDK 57 precompiled binaries** need an Xcode whose
+  Swift matches those binaries — e.g. the `macos-tahoe-26.4-xcode-26.4` EAS
+  image as of Aug 2026.
+- The Swift target does **not** enable C++ interop (`SWIFT_OBJC_INTEROP_MODE`
+  is deliberately absent from the podspec — with it, `import ExpoModulesCore`
+  fails against SDK 57 precompiled binaries). Swift talks to the shim through a
+  plain ObjC header; `PanoramaStitcherShim.mm` still compiles as ObjC++ by file
+  extension.
+- Android statically links OpenCV, so `libpanostitcher.so` is several MB per
+  ABI larger than an AAR-based setup would be — the price of a working
+  stitching module. The `.so` is linked with 16 KB page alignment
+  (Play targetSdk 35+).
 - Web is a stub (`isAvailable() === false`; stitch calls resolve `success: false`).

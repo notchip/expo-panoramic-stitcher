@@ -35,10 +35,25 @@ Pod::Spec.new do |s|
 
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
+    # c++17 + libc++ are for PanoramaStitcherShim.mm, which compiles as ObjC++
+    # by file extension. Keep both.
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',
-    'CLANG_CXX_LIBRARY' => 'libc++',
-    # The .mm shim needs C++ interop; Swift talks to the shim through a plain ObjC header.
-    'SWIFT_OBJC_INTEROP_MODE' => 'objcxx'
+    'CLANG_CXX_LIBRARY' => 'libc++'
+    # NEVER reintroduce 'SWIFT_OBJC_INTEROP_MODE' => 'objcxx' here. The Swift
+    # file never touches a C++ type — it talks to PanoramaStitcherShim through
+    # a plain ObjC header, and the .mm shim compiles as ObjC++ by file
+    # extension regardless of this flag. With objcxx interop ON,
+    # `import ExpoModulesCore` in a precompiled-modules Expo SDK 57 app
+    # activates the `#ifdef __cplusplus` includes inside ExpoModulesCore's
+    # headers (BridgelessJSCallInvoker.h -> #include <ReactCommon/CallInvoker.h>),
+    # which cannot resolve against the prebuilt React.xcframework header layout
+    # (the header is nested at Headers/React_callinvoker/ReactCommon/CallInvoker.h).
+    # The consumer build then fails while compiling
+    # ExpoPanoramicStitcherModule.swift with:
+    #   'ReactCommon/CallInvoker.h' file not found
+    #   ... could not build Objective-C module 'ExpoModulesCore'
+    # This module is typically the ONLY source-built pod importing
+    # ExpoModulesCore in an SDK 57 app, so only it trips this.
   }
 
   s.source_files = '*.{h,m,mm,swift}'
