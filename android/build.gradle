@@ -2,7 +2,7 @@ apply plugin: 'com.android.library'
 apply plugin: 'org.jetbrains.kotlin.android'
 
 group = 'expo.modules.panoramicstitcher'
-version = '0.3.0'
+version = '0.5.0'
 
 def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
 apply from: expoModulesCorePlugin
@@ -187,8 +187,8 @@ tasks.whenTaskAdded { task ->
 android {
   namespace "expo.modules.panoramicstitcher"
   defaultConfig {
-    versionCode 3
-    versionName "0.3.0"
+    versionCode 4
+    versionName "0.5.0"
     externalNativeBuild {
       cmake {
         // c++_shared: React Native apps already use the shared C++ runtime,

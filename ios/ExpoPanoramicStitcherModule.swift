@@ -72,6 +72,7 @@ public class ExpoPanoramicStitcherModule: Module {
       warpMode: options.warpMode,
       blendStrength: options.blendStrength,
       matchConf: options.matchConf,
+      panoConfidence: options.panoConfidence,
       outputWidth: options.outputWidth,
       autoResize: options.autoResize,
       jpegQuality: options.jpegQuality
@@ -80,6 +81,7 @@ public class ExpoPanoramicStitcherModule: Module {
     let success = (dict[PanoStitchSuccessKey] as? Bool) ?? false
     let width = (dict[PanoStitchWidthKey] as? Int) ?? 0
     let height = (dict[PanoStitchHeightKey] as? Int) ?? 0
+    let usedIndices = (dict[PanoStitchUsedIndicesKey] as? [Int]) ?? []
     let error = (dict[PanoStitchErrorKey] as? String) ?? ""
 
     if !success {
@@ -92,6 +94,8 @@ public class ExpoPanoramicStitcherModule: Module {
       width: width,
       height: height,
       aspectRatio: height > 0 ? Double(width) / Double(height) : 0,
+      usedIndices: usedIndices,
+      usedCount: usedIndices.count,
       errorMessage: ""
     )
   }
@@ -107,6 +111,8 @@ public class ExpoPanoramicStitcherModule: Module {
       base64Image: data.base64EncodedString(),
       width: result.width,
       height: result.height,
+      usedIndices: result.usedIndices,
+      usedCount: result.usedCount,
       errorMessage: ""
     )
   }
@@ -130,6 +136,8 @@ public class ExpoPanoramicStitcherModule: Module {
       base64Image: clean,
       width: width,
       height: height,
+      usedIndices: [0],
+      usedCount: 1,
       errorMessage: ""
     )
   }
@@ -188,6 +196,7 @@ struct StitchOptions: Record {
   @Field var warpMode: String = "spherical"
   @Field var blendStrength: Int = 5
   @Field var matchConf: Float = 0.3
+  @Field var panoConfidence: Float = 1.0
   @Field var outputWidth: Int = 4096
   @Field var autoResize: Bool = true
   @Field var jpegQuality: Int = 95
@@ -199,6 +208,8 @@ struct StitchResult: Record {
   @Field var width: Int = 0
   @Field var height: Int = 0
   @Field var aspectRatio: Double = 0
+  @Field var usedIndices: [Int] = []
+  @Field var usedCount: Int = 0
   @Field var errorMessage: String = ""
 }
 
@@ -207,5 +218,7 @@ struct StitchBase64Result: Record {
   @Field var base64Image: String = ""
   @Field var width: Int = 0
   @Field var height: Int = 0
+  @Field var usedIndices: [Int] = []
+  @Field var usedCount: Int = 0
   @Field var errorMessage: String = ""
 }

@@ -12,6 +12,7 @@ const DEFAULTS: Required<StitchOptions> = {
   warpMode: "spherical",
   blendStrength: 5,
   matchConf: 0.3,
+  panoConfidence: 1.0,
   outputWidth: 4096,
   autoResize: true,
   jpegQuality: 95,

@@ -22,6 +22,8 @@ class ExpoPanoramicStitcherModule extends NativeModule<ExpoPanoramicStitcherModu
       width: 0,
       height: 0,
       aspectRatio: 0,
+      usedIndices: [],
+      usedCount: 0,
       errorMessage: UNSUPPORTED,
     };
   }
@@ -31,6 +33,8 @@ class ExpoPanoramicStitcherModule extends NativeModule<ExpoPanoramicStitcherModu
       base64Image: "",
       width: 0,
       height: 0,
+      usedIndices: [],
+      usedCount: 0,
       errorMessage: UNSUPPORTED,
     };
   }
@@ -40,6 +44,8 @@ class ExpoPanoramicStitcherModule extends NativeModule<ExpoPanoramicStitcherModu
       base64Image: "",
       width: 0,
       height: 0,
+      usedIndices: [],
+      usedCount: 0,
       errorMessage: UNSUPPORTED,
     };
   }

@@ -27,13 +27,15 @@
 #define YES ((BOOL)1)
 #endif
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
-NSString *const PanoStitchSuccessKey = @"success";
-NSString *const PanoStitchWidthKey   = @"width";
-NSString *const PanoStitchHeightKey  = @"height";
-NSString *const PanoStitchErrorKey   = @"errorMessage";
+NSString *const PanoStitchSuccessKey     = @"success";
+NSString *const PanoStitchWidthKey       = @"width";
+NSString *const PanoStitchHeightKey      = @"height";
+NSString *const PanoStitchUsedIndicesKey = @"usedIndices";
+NSString *const PanoStitchErrorKey       = @"errorMessage";
 
 @implementation PanoramaStitcherShim
 
@@ -57,11 +59,31 @@ NSString *const PanoStitchErrorKey   = @"errorMessage";
 
 + (NSDictionary *)resultWithError:(NSString *)message {
   return @{
-    PanoStitchSuccessKey : @(NO),
-    PanoStitchWidthKey   : @(0),
-    PanoStitchHeightKey  : @(0),
-    PanoStitchErrorKey   : message ?: @"Unknown error",
+    PanoStitchSuccessKey     : @(NO),
+    PanoStitchWidthKey       : @(0),
+    PanoStitchHeightKey      : @(0),
+    PanoStitchUsedIndicesKey : @[],
+    PanoStitchErrorKey       : message ?: @"Unknown error",
   };
+}
+
+// Distinct, actionable message per cv::Stitcher::Status. Text must stay
+// identical to the Android JNI shim so consumers can match by substring.
++ (NSString *)messageForStatus:(cv::Stitcher::Status)status {
+  switch (status) {
+    case cv::Stitcher::ERR_NEED_MORE_IMGS:
+      return @"Not enough matched images to build a panorama (ERR_NEED_MORE_IMGS). "
+              "Ensure 30-40% overlap between adjacent images, or lower panoConfidence.";
+    case cv::Stitcher::ERR_HOMOGRAPHY_EST_FAIL:
+      return @"Homography estimation failed (ERR_HOMOGRAPHY_EST_FAIL). warpMode 'plane' "
+              "assumes a flat/translational scene - use 'spherical' or 'cylindrical' for "
+              "rotational captures.";
+    case cv::Stitcher::ERR_CAMERA_PARAMS_ADJUST_FAIL:
+      return @"Camera parameter adjustment failed (ERR_CAMERA_PARAMS_ADJUST_FAIL). Images "
+              "may have too little overlap or too few matched features.";
+    default:
+      return [NSString stringWithFormat:@"OpenCV stitch failed (status %d).", (int)status];
+  }
 }
 
 + (NSDictionary *)stitchImagePaths:(NSArray<NSString *> *)imagePaths
@@ -69,6 +91,7 @@ NSString *const PanoStitchErrorKey   = @"errorMessage";
                           warpMode:(NSString *)warpMode
                      blendStrength:(NSInteger)blendStrength
                          matchConf:(float)matchConf
+                    panoConfidence:(float)panoConfidence
                        outputWidth:(NSInteger)outputWidth
                         autoResize:(BOOL)autoResize
                        jpegQuality:(NSInteger)jpegQuality {
@@ -99,6 +122,12 @@ NSString *const PanoStitchErrorKey   = @"errorMessage";
           cv::makePtr<cv::detail::BestOf2NearestMatcher>(false, matchConf));
     }
 
+    // panoConfidence = pano confidence threshold. After matching, OpenCV keeps
+    // only the largest connected component of images clearing this bar
+    // (leaveBiggestComponent) — at the default 1.0 it can silently drop
+    // weakly-matched images. Must be set before estimateTransform (stitch()).
+    stitcher->setPanoConfidenceThresh((double)panoConfidence);
+
     // blendStrength 1-10 = number of multiband blending bands.
     int bands = (int)MIN(MAX(blendStrength, 1), 10);
     stitcher->setBlender(cv::makePtr<cv::detail::MultiBandBlender>(false, bands));
@@ -110,7 +139,15 @@ NSString *const PanoStitchErrorKey   = @"errorMessage";
     cv::Mat pano;
     cv::Stitcher::Status status = stitcher->stitch(images, pano);
     if (status != cv::Stitcher::OK) {
-      return [self resultWithError:[NSString stringWithFormat:@"OpenCV stitch failed (status %d). Ensure 30-40%% overlap between images.", (int)status]];
+      return [self resultWithError:[self messageForStatus:status]];
+    }
+
+    // Which input images ended up in the composite (ascending input indices).
+    std::vector<int> component = stitcher->component();
+    std::sort(component.begin(), component.end());
+    NSMutableArray<NSNumber *> *usedIndices = [NSMutableArray arrayWithCapacity:component.size()];
+    for (int idx : component) {
+      [usedIndices addObject:@(idx)];
     }
 
     if (autoResize && outputWidth > 0) {
@@ -128,10 +165,11 @@ NSString *const PanoStitchErrorKey   = @"errorMessage";
     }
 
     return @{
-      PanoStitchSuccessKey : @(YES),
-      PanoStitchWidthKey   : @(pano.cols),
-      PanoStitchHeightKey  : @(pano.rows),
-      PanoStitchErrorKey   : @"",
+      PanoStitchSuccessKey     : @(YES),
+      PanoStitchWidthKey       : @(pano.cols),
+      PanoStitchHeightKey      : @(pano.rows),
+      PanoStitchUsedIndicesKey : usedIndices,
+      PanoStitchErrorKey       : @"",
     };
   } catch (const cv::Exception &e) {
     return [self resultWithError:[NSString stringWithFormat:@"OpenCV exception: %s", e.what()]];

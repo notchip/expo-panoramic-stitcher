@@ -3,6 +3,36 @@
 Notable changes to `@notchip/expo-panoramic-stitcher`. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.5.0] — 2026-08-30
+
+### Added
+
+- **`panoConfidence` option** (default `1.0`, both platforms): exposes OpenCV's
+  `setPanoConfidenceThresh`. At the previous hard-wired default of 1.0,
+  `leaveBiggestComponent()` can silently drop weakly-matched images (observed
+  in the field: 6 of 9 room photos discarded on low-texture walls) — lower
+  values (0.5–0.7) keep more images at the risk of worse alignment. Applied
+  before `estimateTransform` on iOS and Android.
+- **`usedIndices: number[]` + `usedCount: number` on every result**
+  (`StitchResult` and `StitchBase64Result`): the ascending input indices
+  OpenCV actually composited (`cv::Stitcher::component()`), so callers can
+  tell a full panorama from a 3-of-9 partial. The incremental first-frame
+  pass-through reports `[0]` / `1`; the web stub `[]` / `0`. The Kotlin↔JNI
+  protocol grew a fourth segment: `ok|<w>|<h>|<idx,idx,...>`.
+
+### Changed
+
+- **Readable stitch errors:** `Stitcher::Status` codes now map to distinct
+  messages, identical text on both platforms — `ERR_NEED_MORE_IMGS`
+  (too few matched images; raise overlap or lower `panoConfidence`),
+  `ERR_HOMOGRAPHY_EST_FAIL` (typical when `warpMode: 'plane'` runs on a
+  rotational capture — affine assumes a flat scene, use
+  spherical/cylindrical), `ERR_CAMERA_PARAMS_ADJUST_FAIL` (bundle adjustment
+  failed; overlap/feature starvation) — replacing the generic
+  "OpenCV stitch failed (status N)".
+- No packaging changes: 0.4.0's vendored iOS xcframework and the Android
+  Gradle SDK download are untouched.
+
 ## [0.4.0] — 2026-08-26
 
 ### Fixed

@@ -13,10 +13,11 @@
 NS_ASSUME_NONNULL_BEGIN
 
 /// Keys present in the returned NSDictionary.
-extern NSString *const PanoStitchSuccessKey;   // NSNumber(BOOL)
-extern NSString *const PanoStitchWidthKey;      // NSNumber(int)
-extern NSString *const PanoStitchHeightKey;     // NSNumber(int)
-extern NSString *const PanoStitchErrorKey;      // NSString
+extern NSString *const PanoStitchSuccessKey;      // NSNumber(BOOL)
+extern NSString *const PanoStitchWidthKey;        // NSNumber(int)
+extern NSString *const PanoStitchHeightKey;       // NSNumber(int)
+extern NSString *const PanoStitchUsedIndicesKey;  // NSArray<NSNumber(int)> — input indices actually composited
+extern NSString *const PanoStitchErrorKey;        // NSString
 
 @interface PanoramaStitcherShim : NSObject
 
@@ -33,6 +34,7 @@ extern NSString *const PanoStitchErrorKey;      // NSString
                           warpMode:(NSString *)warpMode
                      blendStrength:(NSInteger)blendStrength
                          matchConf:(float)matchConf
+                    panoConfidence:(float)panoConfidence
                        outputWidth:(NSInteger)outputWidth
                         autoResize:(BOOL)autoResize
                        jpegQuality:(NSInteger)jpegQuality;

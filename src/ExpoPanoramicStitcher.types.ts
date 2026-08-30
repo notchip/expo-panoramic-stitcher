@@ -16,6 +16,16 @@ export interface StitchOptions {
   blendStrength?: number;
   /** Feature-match confidence 0.0-1.0. Lower = more lenient matching. Default: 0.3. */
   matchConf?: number;
+  /**
+   * Panorama confidence threshold (OpenCV `setPanoConfidenceThresh`). After
+   * matching, OpenCV keeps only the largest connected component of images whose
+   * pairwise confidence clears this bar — at the default 1.0 it can silently
+   * drop weakly-matched images (e.g. low-texture walls) and stitch a partial
+   * panorama. Lower values (0.5-0.7) keep more images at the risk of worse
+   * alignment. Check `usedIndices`/`usedCount` on the result to see what was
+   * actually composited. Default: 1.0 (OpenCV's default).
+   */
+  panoConfidence?: number;
   /** Output width in px. Height auto-derives (2:1 when `autoResize`). Default: 4096. */
   outputWidth?: number;
   /** Resize result to equirectangular 2:1 aspect ratio. Default: true. */
@@ -38,6 +48,15 @@ export interface StitchResult {
   height: number;
   /** Width / height. ~2.0 for equirectangular. */
   aspectRatio: number;
+  /**
+   * Indices (into the input array, ascending) of the images OpenCV actually
+   * composited. OpenCV keeps only the largest connected component of matched
+   * images, so this can be a subset — `usedCount < inputs.length` means a
+   * partial panorama (see `panoConfidence`).
+   */
+  usedIndices: number[];
+  /** `usedIndices.length` — compare against your input count. */
+  usedCount: number;
   /** Human-readable error (empty on success; only the web stub populates it). */
   errorMessage: string;
 }
@@ -54,6 +73,14 @@ export interface StitchBase64Result {
   base64Image: string;
   width: number;
   height: number;
+  /**
+   * Indices (into the input array, ascending) of the images OpenCV actually
+   * composited — a subset means a partial panorama (see `panoConfidence`).
+   * The incremental first-frame pass-through reports `[0]` / `1`.
+   */
+  usedIndices: number[];
+  /** `usedIndices.length` — compare against your input count. */
+  usedCount: number;
   errorMessage: string;
 }
 

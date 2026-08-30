@@ -1,6 +1,6 @@
 {
   "name": "@notchip/expo-panoramic-stitcher",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "360° / wide panorama image stitching for Expo (SDK 56+) via Swift + Kotlin, powered by OpenCV. No manual OpenCV download required.",
   "main": "build/index.js",
   "types": "build/index.d.ts",

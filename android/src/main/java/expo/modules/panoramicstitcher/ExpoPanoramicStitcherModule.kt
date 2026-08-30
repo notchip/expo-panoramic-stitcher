@@ -26,6 +26,7 @@ private object PanoramaStitcherNative {
     warpMode: String,
     blendStrength: Int,
     matchConf: Float,
+    panoConfidence: Float,
     outputWidth: Int,
     autoResize: Boolean,
     jpegQuality: Int
@@ -140,18 +141,24 @@ class ExpoPanoramicStitcherModule : Module() {
       opts.warpMode,
       opts.blendStrength,
       opts.matchConf,
+      opts.panoConfidence,
       opts.outputWidth,
       opts.autoResize,
       opts.jpegQuality
     )
 
-    // Shim protocol: "ok|<width>|<height>" or "err|<message>".
+    // Shim protocol: "ok|<width>|<height>|<idx,idx,...>" or "err|<message>".
     if (!raw.startsWith("ok|")) {
       throw StitchException(raw.removePrefix("err|"))
     }
     val parts = raw.split("|")
     val width = parts[1].toInt()
     val height = parts[2].toInt()
+    val usedIndices = parts.getOrNull(3)
+      ?.takeIf { it.isNotEmpty() }
+      ?.split(",")
+      ?.map { it.toInt() }
+      ?: emptyList()
 
     return mapOf(
       "success" to true,
@@ -159,6 +166,8 @@ class ExpoPanoramicStitcherModule : Module() {
       "width" to width,
       "height" to height,
       "aspectRatio" to if (height > 0) width.toDouble() / height else 0.0,
+      "usedIndices" to usedIndices,
+      "usedCount" to usedIndices.size,
       "errorMessage" to ""
     )
   }
@@ -177,6 +186,8 @@ class ExpoPanoramicStitcherModule : Module() {
         "base64Image" to Base64.encodeToString(bytes, Base64.NO_WRAP),
         "width" to (result["width"] ?: 0),
         "height" to (result["height"] ?: 0),
+        "usedIndices" to (result["usedIndices"] ?: emptyList<Int>()),
+        "usedCount" to (result["usedCount"] ?: 0),
         "errorMessage" to ""
       )
     } finally {
@@ -198,6 +209,8 @@ class ExpoPanoramicStitcherModule : Module() {
       "base64Image" to clean,
       "width" to bounds.outWidth,
       "height" to bounds.outHeight,
+      "usedIndices" to listOf(0),
+      "usedCount" to 1,
       "errorMessage" to ""
     )
   }
@@ -254,6 +267,7 @@ private data class StitchOptions(
   val warpMode: String,
   val blendStrength: Int,
   val matchConf: Float,
+  val panoConfidence: Float,
   val outputWidth: Int,
   val autoResize: Boolean,
   val jpegQuality: Int
@@ -263,6 +277,7 @@ private data class StitchOptions(
       warpMode = map["warpMode"] as? String ?: "spherical",
       blendStrength = (map["blendStrength"] as? Number)?.toInt() ?: 5,
       matchConf = (map["matchConf"] as? Number)?.toFloat() ?: 0.3f,
+      panoConfidence = (map["panoConfidence"] as? Number)?.toFloat() ?: 1.0f,
       outputWidth = (map["outputWidth"] as? Number)?.toInt() ?: 4096,
       autoResize = map["autoResize"] as? Boolean ?: true,
       jpegQuality = (map["jpegQuality"] as? Number)?.toInt() ?: 95

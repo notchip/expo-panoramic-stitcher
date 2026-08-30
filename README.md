@@ -85,6 +85,18 @@ Native failures (unreadable input, not enough overlap, encode errors) **reject
 the promise** — use `try/catch`. A resolved result always has `success: true`
 on iOS/Android; only the web stub resolves with `success: false`.
 
+**Partial panoramas:** a successful stitch is not necessarily a *complete* one.
+OpenCV composites only the largest connected component of matched images, so a
+9-photo set can resolve as a 3-photo panorama with no error. Every result
+carries `usedIndices` (ascending indices into your input array) and `usedCount`
+— treat `usedCount < inputs.length` as a partial and either re-shoot the gaps
+or retry with a lower `panoConfidence`. Stitch failures reject with distinct
+per-status messages: `ERR_NEED_MORE_IMGS` (too few matched images),
+`ERR_HOMOGRAPHY_EST_FAIL` (typical when `warpMode: 'plane'` is used on a
+rotational capture — plane/affine assumes a flat scene), and
+`ERR_CAMERA_PARAMS_ADJUST_FAIL` (bundle adjustment collapsed; usually overlap
+or feature starvation). The message text is identical on both platforms.
+
 ### Options (`StitchOptions`)
 
 | field | default | notes |
@@ -92,6 +104,7 @@ on iOS/Android; only the web stub resolves with `success: false`.
 | `warpMode` | `spherical` | `spherical` (360°), `cylindrical` (wide horizontal), `plane` (flat scans, affine) |
 | `blendStrength` | 5 | 1–10, number of multiband blending bands (clamped) |
 | `matchConf` | 0.3 | feature-match confidence 0–1, lower = more lenient |
+| `panoConfidence` | 1.0 | pano confidence threshold — OpenCV keeps only the largest connected component of images clearing this bar, so at 1.0 weakly-matched shots (low-texture walls) can be **silently dropped**. Lower (0.5–0.7) keeps more images at the risk of worse alignment; check `usedIndices` on the result |
 | `outputWidth` | 4096 | height auto = width/2 when `autoResize` |
 | `autoResize` | true | force equirectangular 2:1 |
 | `jpegQuality` | 95 | 1–100 |
