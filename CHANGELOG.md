@@ -3,6 +3,80 @@
 Notable changes to `@notchip/expo-panoramic-stitcher`. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.6.0] — 2026-09-01
+
+### Added
+
+- **Guided-sweep capture layer** under a new subpath export
+  `@notchip/expo-panoramic-stitcher/capture` — an iOS-panorama-style capture
+  flow (auto-shoot every N degrees of yaw while the user rotates in place),
+  ported from a field-tested implementation. Two layers:
+  - `useGuidedSweep(options)`: headless hook — full `idle → sweeping → done`
+    state machine, DeviceMotion sensor fusion (gyro yaw integrated on the
+    sensor clock and projected onto gravity, with the platform-specific
+    `rotationRate` axis mapping verified against expo-sensors native sources),
+    settle-window leveling baseline, direction auto-detect with single
+    re-latch, overshoot/wrong-way guidance, EMA rate gate, tilt gate,
+    AppState-background abort, and a generation counter that drops in-flight
+    captures on reset. HUD status is a machine-readable `SweepStatus` enum
+    (`START_TURNING`, `KEEP_TURNING`, `SLOW_DOWN`, `HOLD`, `LEVEL_THE_PHONE`,
+    `GO_BACK`) — consumers localize.
+  - `<GuidedSweepCapture />`: batteries-included fullscreen screen —
+    CameraView + the hook + a default HUD (tick rail, level bar, status text,
+    thumbnail strip, start/finish/redo controls), plain RN `StyleSheet` only.
+    Props: `onComplete(photos)`, `onCancel`, overrides for every threshold
+    (`stepDeg` 15, `tolDeg` 2.5, `overshootDeg` 9, `maxRateDegS` 14,
+    `tiltWarnDeg` 5, `tiltBlockDeg` 10, `maxShots` 24, …), a `strings` map
+    for localization, `accentColor`, and `renderHUD(state)` to replace the
+    overlay entirely. Photos are `{ uri, width, height, yawDeg }`.
+- **`stitchSweep(photos, options)`** in the core entry — sweep-aware
+  orchestration over `stitchImagePaths`, plain TS, **no native changes**.
+  Informed by full-circle field results (a 24-shot 360° sweep stitched 17/24
+  `[2–18]` cylindrical while a plane run independently used `[19–23,0–10]`,
+  contiguous across the wrap — the matcher connects the loop, but the
+  high-level Stitcher keeps one maximal arc and has no concept of a circular
+  chain). Behaviors: **wrap closure** (yaw span ≥ ~330° → the first two
+  photos are re-appended so the chain sees its loop; `wrapClosed: true` =
+  trailing edge duplicates the start, caller may crop), **arc salvage** (a
+  dropped complement is re-stitched once; all strips returned in `strips`,
+  largest first; a failed complement is not an error), **gap feedback**
+  (`gaps` = yaw ranges of dropped-and-unsalvaged photos, for "re-sweep near
+  280°" UX). Defaults `warpMode: 'cylindrical'` + `panoConfidence: 0.7`;
+  `warpMode: 'plane'` is rejected (can't exceed ~120° FOV — still available
+  via `stitchImagePaths` for diagnostics); a failed `spherical` stitch falls
+  back to cylindrical exactly once (`fellBackToCylindrical`). New types:
+  `SweepInputPhoto`, `StitchSweepOptions`, `StitchSweepResult`, `SweepStrip`,
+  `SweepGap`, `SweepWarpMode`.
+- **First in-tree tests** (`src/__tests__/stitchSweep.test.ts`): the
+  wrap-closure index mapping, salvage mapping, gap computation, plane
+  rejection, and the single spherical fallback run under jest against a
+  mocked native module (plus a root `babel.config.js` delegating to
+  `expo-module-scripts/babel.config.base`, used only by jest).
+- **New peer dependencies (capture entry only):** `expo-camera` and
+  `expo-sensors` (>= 56), plus optional `expo-haptics` (feature-detected —
+  missing haptics is a silent no-op) and optional
+  `react-native-safe-area-context` (HUD edge padding fallback). All four are
+  marked optional in `peerDependenciesMeta` so plain-stitcher installs stay
+  lean; the core `@notchip/expo-panoramic-stitcher` entry imports none of
+  them.
+- **`exports` map in package.json** for `.` and `./capture` (with `types`
+  conditions); `main`/`types` kept for older resolvers.
+
+### Changed
+
+- **Dev/verification matrix moved to Expo SDK 57** (stable line as of
+  2026-09-01): `expo@~57.0.18`, React Native 0.86.3, React 19.2.3,
+  `expo-camera@~57.0.4`, `expo-sensors@~57.0.2`, `expo-haptics@~57.0.2` as
+  devDependencies. Consumer support is unchanged — peers stay `>=56.0.0`
+  (SDK 56 and 57 apps both work). Notes for maintainers (all dev-only):
+  `expo-module-scripts` has no 57 line yet (56.0.3 is latest), so
+  `overrides` pin its `jest-expo` to `~57.0.5` and
+  `@react-native/jest-preset` to `0.86.3` to keep the tree consistent with
+  RN 0.86; `jest@^29` is now a direct devDependency because `jest-expo@57`
+  no longer ships the `jest` binary transitively.
+- Core stitcher API and native packaging are untouched (vendored iOS
+  xcframework postinstall, Android Gradle SDK download, JNI protocol).
+
 ## [0.5.0] — 2026-08-30
 
 ### Added

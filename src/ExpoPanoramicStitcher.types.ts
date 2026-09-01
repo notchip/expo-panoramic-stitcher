@@ -84,6 +84,90 @@ export interface StitchBase64Result {
   errorMessage: string;
 }
 
+/**
+ * Minimal photo shape `stitchSweep` needs. The capture entry's `SweepPhoto`
+ * (`@notchip/expo-panoramic-stitcher/capture`) is structurally assignable —
+ * the type is duplicated here because the core entry must not import from
+ * the capture entry.
+ */
+export interface SweepInputPhoto {
+  /** Image file URI/path (anything `stitchImagePaths` accepts). */
+  uri: string;
+  /** Integrated yaw (degrees) at capture time — signed, monotonic along the sweep. */
+  yawDeg: number;
+}
+
+/** Warp modes `stitchSweep` accepts — `plane` is rejected (see `stitchSweep`). */
+export type SweepWarpMode = "spherical" | "cylindrical";
+
+export interface StitchSweepOptions extends Omit<StitchOptions, "warpMode"> {
+  /**
+   * Default: `cylindrical` (not `spherical` — long single chains have been
+   * observed to diverge in spherical bundle adjustment). `plane` is rejected
+   * with an error: an affine/plane projection cannot cover a rotational sweep
+   * beyond ~120° FOV (it remains available via `stitchImagePaths` for
+   * diagnostics).
+   */
+  warpMode?: SweepWarpMode;
+}
+
+/** One stitched strip returned by `stitchSweep` (primary panorama or a salvaged arc). */
+export interface SweepStrip {
+  /** Absolute filesystem path to this strip's JPEG (no `file://` scheme). */
+  path: string;
+  width: number;
+  height: number;
+  /**
+   * Original `photos[]` indices composited into this strip, ascending and
+   * deduplicated (wrap-closure duplicates are mapped back to their source
+   * photo).
+   */
+  usedIndices: number[];
+}
+
+/** A yaw range (degrees, from `photos[].yawDeg`) not covered by any returned strip. */
+export interface SweepGap {
+  fromDeg: number;
+  toDeg: number;
+}
+
+/**
+ * Result of `stitchSweep`. The top-level `path`/`width`/`height`/
+ * `usedIndices`/`usedCount` mirror `StitchResult` and describe the LARGEST
+ * strip (always `strips[0]`); salvaged secondary arcs follow in `strips`.
+ */
+export interface StitchSweepResult {
+  success: boolean;
+  /** Largest strip's JPEG path (same as `strips[0].path`). */
+  path: string;
+  width: number;
+  height: number;
+  /** Width / height of the largest strip. */
+  aspectRatio: number;
+  /** Original photo indices in the largest strip (ascending, deduplicated). */
+  usedIndices: number[];
+  usedCount: number;
+  /** All stitched strips, largest first (by number of photos used). */
+  strips: SweepStrip[];
+  /**
+   * Yaw ranges covered by photos that ended up in NO strip — show the user
+   * "re-sweep near X°". Empty when every photo was used somewhere.
+   */
+  gaps: SweepGap[];
+  /**
+   * True when wrap closure fired (total yaw span ≥ ~330°): the first two
+   * photos were re-appended after the last so OpenCV could close the circular
+   * chain, and the panorama's TRAILING edge therefore duplicates its start —
+   * callers may crop.
+   */
+  wrapClosed: boolean;
+  /** The warp mode that actually produced the primary strip. */
+  warpModeUsed: SweepWarpMode;
+  /** True when a failed `spherical` stitch fell back to `cylindrical` (happens at most once). */
+  fellBackToCylindrical: boolean;
+  errorMessage: string;
+}
+
 export type ExpoPanoramicStitcherModuleEvents = {
   /**
    * Coarse stage progress emitted during stitches.

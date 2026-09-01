@@ -34,7 +34,8 @@ npx expo install @notchip/expo-panoramic-stitcher   # or: add as a local module
 npx expo prebuild --clean
 ```
 
-Requirements: Expo SDK 56+ (React Native 0.85+), iOS 16.4+, Xcode 26.4+,
+Requirements: Expo SDK 56+ (React Native 0.85+; developed and verified
+against SDK 57 / RN 0.86), iOS 16.4+, Xcode 26.4+,
 Android minSdk 24. **`npm install` (postinstall, macOS only)** downloads the
 prebuilt `opencv2.xcframework` once (~191 MB zip, SHA-256-verified) into this
 package's `ios/` directory, where the podspec vendors it — rerun manually with
@@ -114,6 +115,157 @@ or feature starvation). The message text is identical on both platforms.
 `onStitchProgress` fires coarse stages: `decoding` (0.1) → `stitching` (0.3) →
 `encoding` (0.85) → `done` (1.0). `stitchImagePaths` emits only `stitching` and
 `done`; the incremental first-frame pass-through emits nothing.
+
+## Guided capture (`/capture`)
+
+The stitcher is only as good as its input. The optional
+`@notchip/expo-panoramic-stitcher/capture` entry ships an iOS-panorama-style
+**guided sweep**: the user stands in one spot and rotates in place while the
+screen auto-captures a photo every 15° of yaw (gyro-integrated, gravity-aligned),
+gated on hold-still speed and tilt — which is what reliably produces the
+~30–40% overlap OpenCV needs. The state machine was tuned on real devices.
+
+It is a separate subpath export so the core stitcher stays dependency-lean:
+importing only `@notchip/expo-panoramic-stitcher` pulls in none of the
+capture dependencies.
+
+### Install (capture peers)
+
+```bash
+npx expo install expo-camera expo-sensors   # required by /capture
+npx expo install expo-haptics               # optional: shutter feedback
+```
+
+`expo-camera` and `expo-sensors` are peer dependencies of the `/capture` entry
+only (marked optional in `peerDependenciesMeta` so plain-stitcher installs stay
+lean — install them yourself when you use `/capture`). `expo-haptics` is fully
+optional: it is feature-detected with a guarded require, and when absent the
+capture UI simply skips the per-shot haptic. `react-native-safe-area-context`
+is likewise optional — used for HUD edge padding when present (it is in
+virtually every Expo app), with a fixed-padding fallback otherwise. Remember
+`expo-camera` needs the camera permission set up via its config plugin (and
+iOS DeviceMotion needs `NSMotionUsageDescription`).
+
+### Quick start — full-screen component
+
+```tsx
+import { stitchSweep } from '@notchip/expo-panoramic-stitcher';
+import { GuidedSweepCapture, type SweepPhoto } from '@notchip/expo-panoramic-stitcher/capture';
+
+function CaptureScreen({ onDone }: { onDone: (panoPath: string) => void }) {
+  return (
+    <GuidedSweepCapture
+      onComplete={async (photos: SweepPhoto[]) => {
+        // stitchSweep uses the photos' yawDeg for wrap closure + gap feedback
+        const res = await stitchSweep(photos);
+        onDone(res.path);
+      }}
+      onCancel={() => {/* navigate back */}}
+      // every threshold is overridable:
+      // stepDeg={15} tolDeg={2.5} overshootDeg={9} maxRateDegS={14}
+      // tiltWarnDeg={5} tiltBlockDeg={10} maxShots={24}
+      accentColor="#0A84FF"
+      strings={{ statuses: { HOLD: 'Halten…' } }} // localize any copy
+      // renderHUD={(sweep) => <MyOverlay {...sweep} />} // replace the overlay entirely
+    />
+  );
+}
+```
+
+`SweepPhoto` is `{ uri, width, height, yawDeg }` — `yawDeg` is the integrated
+yaw at the moment each shutter fired, useful for diagnosing gaps in a partial
+panorama (`usedIndices`).
+
+### Headless hook — bring your own UI
+
+`useGuidedSweep(options)` is the full state machine with no UI: phases
+(`idle → sweeping → done`), sensor fusion, capture gating. You render the
+camera and HUD yourself and bind the returned ref + ready callback:
+
+```tsx
+import { CameraView } from 'expo-camera';
+import { useGuidedSweep, SweepStatus } from '@notchip/expo-panoramic-stitcher/capture';
+
+function MyCapture() {
+  const { phase, shots, hud, start, finish, reset, cameraRef, onCameraReady, isCameraReady } =
+    useGuidedSweep({ stepDeg: 15 });
+
+  return (
+    <>
+      <CameraView ref={cameraRef} onCameraReady={onCameraReady} facing="back" animateShutter={false} />
+      {/* hud = { yawDeg, toTargetDeg, tiltDeg, rollDeg, status } at ~15 Hz.
+          hud.status is a SweepStatus enum (START_TURNING, KEEP_TURNING,
+          SLOW_DOWN, HOLD, LEVEL_THE_PHONE, GO_BACK) — map it to your own
+          localized strings; the hook never produces display copy. */}
+    </>
+  );
+}
+```
+
+The sweep auto-finishes at `maxShots` and **aborts to `done` when the app
+backgrounds** — integrated gyro yaw cannot survive an app suspension, so the
+shots taken so far are kept rather than resuming blind.
+
+> **⚠️ expo-sensors axis mapping.** The hook projects `rotationRate` onto
+> gravity to get yaw. The `rotationRate` axis mapping in expo-sensors is
+> **platform-specific and contradicts the documentation** (verified against
+> the native sources, `DeviceMotionModule.swift` / `DeviceMotionModule.kt`):
+> iOS delivers `alpha=Z, beta=Y, gamma=X`; Android delivers
+> `alpha=X, beta=Y, gamma=Z`. The hook handles this internally — but if you
+> build your own sensor math on expo-sensors, do not trust the docs' axis
+> labels. Getting it wrong projects pitch wobble instead of yaw and the sweep
+> never advances.
+
+**Known limitation:** `expo-camera` cannot lock AE/AWB, so exposure may drift
+across a sweep (e.g. panning past a window). OpenCV's gain compensation absorbs
+moderate drift; extreme lighting swings can still leave visible seams.
+
+## Sweep-aware stitching (`stitchSweep`)
+
+`stitchSweep(photos, options?)` lives in the **core** entry (plain TS over
+`stitchImagePaths` — no native changes) and understands what a sweep *is*,
+which the raw OpenCV Stitcher does not. The field result that motivates it:
+a 24-shot 360° sweep stitched as 17/24 (`[2–18]`) in cylindrical, while a
+diagnostic plane run independently used `[19–23, 0–10]` — contiguous **across
+the wrap**, proving shot 23 matches shot 0. The pairwise matcher connects
+everything; the high-level Stitcher simply picks one maximal arc and discards
+the rest, because it has no concept of a circular chain. `stitchSweep` adds
+that concept:
+
+1. **Wrap closure** — when the sweep's total yaw span (from `photos[].yawDeg`)
+   is ≥ ~330°, copies of the first two photos are appended after the last so
+   the chain can see its own loop. `wrapClosed: true` on the result means the
+   panorama's **trailing edge duplicates its start** — crop if you care.
+2. **Arc salvage** — if the primary stitch used only a subset
+   (`usedCount < photos.length`), the dropped complement is re-stitched once
+   (same options, order preserved) and **all** successful strips are returned:
+   `strips: [{ path, width, height, usedIndices }]`, largest first (the
+   top-level `path`/`width`/`height`/`usedIndices` mirror `strips[0]`). One
+   failed complement is not an error — you get what succeeded.
+3. **Gap feedback** — `gaps: [{ fromDeg, toDeg }]` are the yaw ranges covered
+   by dropped-and-unsalvaged photos, so a caller can show "re-sweep near
+   280°". Empty when every photo landed in some strip.
+
+```ts
+import { stitchSweep } from '@notchip/expo-panoramic-stitcher';
+
+const res = await stitchSweep(photos); // photos: { uri, yawDeg }[]
+// res.path        largest panorama strip (res.wrapClosed → trailing edge = start)
+// res.strips      every stitched strip, largest first
+// res.gaps        e.g. [{ fromDeg: 270, toDeg: 300 }] → "re-sweep near 280°"
+```
+
+Defaults (deliberately different from `stitchImagePaths`):
+`warpMode: 'cylindrical'` and `panoConfidence: 0.7`. Two hard rules:
+
+- **`warpMode: 'plane'` is rejected** with a clear error — an affine/plane
+  projection cannot cover a rotational sweep beyond ~120° of FOV. It remains
+  available via `stitchImagePaths` for diagnostics.
+- **Spherical caveat:** long single chains can diverge in spherical bundle
+  adjustment (observed in the field). If you pass `warpMode: 'spherical'` and
+  the stitch fails, `stitchSweep` falls back to cylindrical **exactly once**
+  (`fellBackToCylindrical: true` on the result) and never auto-retries beyond
+  that.
 
 ## Architecture
 
