@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Instructions for AI agents (and new humans) working in this repository.
-Checked in — keep it updated when invariants change. `CLAUDE.md` is a
+Checked in — keep it updated when invariants change. `CLAUDE.md` or any llm's md file is a
 gitignored local pointer to this file.
 
 ## What this is
