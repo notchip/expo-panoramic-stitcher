@@ -50,6 +50,15 @@ Toolchain facts that are easy to break:
   --noEmit`, `CI=1 npx expo export --platform android`.
 - `expo-camera`/`expo-sensors`/`expo-haptics` are devDependencies **only for
   typechecking** the capture entry.
+- **Publishing:** CI (`.github/workflows/publish.yml`) publishes on push to
+  main whenever the package.json version is absent from a registry — npmjs
+  via **OIDC trusted publishing** (no `NPM_TOKEN` secret; the trusted
+  publisher is configured on npmjs.com for this repo + `publish.yml`, and
+  needs npm ≥ 11.5.1, upgraded in the workflow), GitHub Packages via the
+  built-in `GITHUB_TOKEN`. The repo `.npmrc` deliberately has **no npmjs
+  authToken line** — a `${NPM_TOKEN}` line shadows `~/.npmrc` for local
+  publishes and makes `npm publish` fail with a misleading 404/401. Manual
+  local publish works with a plain `npm login` (+ 2FA OTP).
 
 ## Architecture
 

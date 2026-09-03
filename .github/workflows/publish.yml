@@ -4,8 +4,13 @@ name: Publish
 # version in package.json is not yet on that registry. Bump the version,
 # push, and both registries update; push without a bump and this is a no-op.
 #
-# Requires the NPM_TOKEN repository secret (npmjs automation token).
-# GitHub Packages uses the built-in GITHUB_TOKEN.
+# npmjs auth is OIDC "trusted publishing" — no NPM_TOKEN secret. One-time
+# setup on npmjs.com (package → Settings → Trusted Publisher): GitHub
+# Actions, owner "notchip", repo "expo-panoramic-stitcher", workflow
+# "publish.yml", no environment. Requires npm CLI >= 11.5.1 (upgraded
+# below) and `permissions: id-token: write`; npm attaches provenance
+# automatically. GitHub Packages still uses the built-in GITHUB_TOKEN via
+# the repo .npmrc.
 
 on:
   push:
@@ -17,17 +22,21 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write # OIDC token for npmjs trusted publishing
     env:
-      # The repo .npmrc resolves these for auth on both registries.
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # The repo .npmrc resolves this for GitHub Packages auth.
       GIT_PAT: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
+
+      # Trusted publishing needs npm >= 11.5.1; the runner's bundled npm may
+      # be older.
+      - run: npm install -g npm@latest
 
       - run: npm ci
 
@@ -48,7 +57,7 @@ jobs:
             echo "ghp=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Publish to npmjs
+      - name: Publish to npmjs (OIDC trusted publishing)
         if: steps.check.outputs.npmjs == 'true'
         run: npm publish --access public --@notchip:registry=https://registry.npmjs.org
 
