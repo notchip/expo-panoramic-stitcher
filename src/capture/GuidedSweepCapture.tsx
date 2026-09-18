@@ -79,6 +79,7 @@ export function GuidedSweepCapture(props: GuidedSweepCaptureProps) {
     onCameraReady,
     isCameraReady,
     config,
+    meta,
   } = sweep;
 
   const S = useMemo<GuidedSweepStrings>(
@@ -299,15 +300,21 @@ export function GuidedSweepCapture(props: GuidedSweepCaptureProps) {
                   <Text style={styles.buttonText}>{S.redoButton}</Text>
                 </Pressable>
                 <Pressable
-                  onPress={() => onComplete(shots)}
-                  disabled={shots.length < minShots}
+                  // `meta` is set by start(), which is the only way into
+                  // "done" from this overlay; the guard only types it.
+                  onPress={() => meta && onComplete(shots, meta)}
+                  disabled={shots.length < minShots || !meta}
                   style={({ pressed }) => [
                     styles.button,
                     styles.doneButton,
                     {
                       backgroundColor: accentColor,
                       opacity:
-                        shots.length < minShots ? 0.4 : pressed ? 0.8 : 1,
+                        shots.length < minShots || !meta
+                          ? 0.4
+                          : pressed
+                            ? 0.8
+                            : 1,
                     },
                   ]}
                 >

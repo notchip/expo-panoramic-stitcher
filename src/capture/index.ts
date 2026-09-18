@@ -10,3 +10,10 @@
 export { GuidedSweepCapture } from "./GuidedSweepCapture";
 export { GUIDED_SWEEP_DEFAULTS, useGuidedSweep } from "./useGuidedSweep";
 export * from "./GuidedSweep.types";
+export {
+  FULL_FRAME_DIAGONAL_MM,
+  deriveFocalPx,
+  normalizeExif,
+  readExifOrientation,
+  type SweepPhotoExif,
+} from "./exifIntrinsics";

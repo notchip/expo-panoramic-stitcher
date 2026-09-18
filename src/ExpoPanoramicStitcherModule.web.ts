@@ -2,8 +2,8 @@ import { registerWebModule, NativeModule } from "expo";
 
 import type {
   ExpoPanoramicStitcherModuleEvents,
-  StitchBase64Result,
-  StitchResult,
+  NativeStitchBase64Result,
+  NativeStitchResult,
 } from "./ExpoPanoramicStitcher.types";
 
 const UNSUPPORTED = "Panorama stitching is not available on web.";
@@ -15,7 +15,7 @@ class ExpoPanoramicStitcherModule extends NativeModule<ExpoPanoramicStitcherModu
   helloFromNative(name: string): string {
     return `Hello ${name} (web stub)`;
   }
-  async stitchImagePaths(): Promise<StitchResult> {
+  async stitchImagePaths(): Promise<NativeStitchResult> {
     return {
       success: false,
       path: "",
@@ -24,10 +24,11 @@ class ExpoPanoramicStitcherModule extends NativeModule<ExpoPanoramicStitcherModu
       aspectRatio: 0,
       usedIndices: [],
       usedCount: 0,
+      geometryJson: "",
       errorMessage: UNSUPPORTED,
     };
   }
-  async stitchBase64(): Promise<StitchBase64Result> {
+  async stitchBase64(): Promise<NativeStitchBase64Result> {
     return {
       success: false,
       base64Image: "",
@@ -35,10 +36,11 @@ class ExpoPanoramicStitcherModule extends NativeModule<ExpoPanoramicStitcherModu
       height: 0,
       usedIndices: [],
       usedCount: 0,
+      geometryJson: "",
       errorMessage: UNSUPPORTED,
     };
   }
-  async stitchIncrementalBase64(): Promise<StitchBase64Result> {
+  async stitchIncrementalBase64(): Promise<NativeStitchBase64Result> {
     return {
       success: false,
       base64Image: "",
@@ -46,6 +48,7 @@ class ExpoPanoramicStitcherModule extends NativeModule<ExpoPanoramicStitcherModu
       height: 0,
       usedIndices: [],
       usedCount: 0,
+      geometryJson: "",
       errorMessage: UNSUPPORTED,
     };
   }

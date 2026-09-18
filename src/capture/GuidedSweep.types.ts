@@ -1,14 +1,109 @@
 import type { CameraView } from "expo-camera";
 import type { ReactNode, RefObject } from "react";
 
-/** One auto-captured frame of a guided sweep. */
+import type { SweepPhotoExif } from "./exifIntrinsics";
+
+/** A unit-free 3-vector in the DEVICE frame (expo-sensors axes). */
+export type SweepVec3 = { x: number; y: number; z: number };
+
+/**
+ * One auto-captured frame of a guided sweep.
+ *
+ * `uri`/`width`/`height`/`yawDeg` are what the stitcher needs (the shape is
+ * structurally assignable to the core entry's `SweepInputPhoto`); the rest
+ * is the sensor/timing/EXIF record of the trigger tick, for consumers that
+ * interpret frames geometrically (per-frame pose priors, intrinsics,
+ * shutter-latency bracketing). All angles are degrees.
+ */
 export type SweepPhoto = {
   /** File URI of the captured JPEG (from expo-camera). */
   uri: string;
+  /**
+   * UPRIGHT pixel width of the delivered frame on both platforms. On
+   * Android with EXIF enabled expo-camera does not rotate the bitmap and
+   * reports raw dims, so the hook swaps them when `exifOrientation` is 5–8
+   * (iOS already reports orientation-aware dims). `cv::imread` honours the
+   * file's EXIF orientation, so the stitcher sees the same upright frame.
+   */
   width: number;
+  /** UPRIGHT pixel height — see `width`. */
   height: number;
-  /** Integrated yaw (degrees) at the moment the shutter was triggered. */
+  /** Integrated yaw at the moment the shutter was triggered. */
   yawDeg: number;
+  /** Pitch delta vs the settle baseline at trigger (signed; the HUD's `tiltDeg` on that tick). */
+  tiltDeg: number;
+  /** Roll delta vs the settle baseline at trigger (signed; the HUD's `rollDeg` on that tick). */
+  rollDeg: number;
+  /** True angular deviation of gravity from the settle baseline at trigger — the capture gate value. */
+  tiltMagDeg: number;
+  /** Smoothed yaw rate (deg/s, EMA) at trigger — the hold-still gate value. */
+  rateDegS: number;
+  /** Normalized gravity direction at trigger, device frame. */
+  gravity: SweepVec3;
+  /** Sensor-clock timestamp of the trigger sample (`rotationRate.timestamp`, seconds). */
+  sensorTs: number;
+  /** `Date.now()` immediately before `takePictureAsync` was called. */
+  triggeredAt: number;
+  /** `Date.now()` when `takePictureAsync` resolved. */
+  resolvedAt: number;
+  /**
+   * Integrated yaw when the picture resolved. Together with `yawDeg` this
+   * brackets the shutter latency: the true exposure yaw lies in between.
+   */
+  yawDegAtResolve: number;
+  /** EXIF `Orientation` (1–8) of the delivered file, `null` when EXIF was off or absent. */
+  exifOrientation: number | null;
+  /** Normalized EXIF (see `GuidedSweepOptions.exif`), `null` when off, unavailable or rejected. */
+  exif: SweepPhotoExif | null;
+};
+
+/** Why a sweep ended. */
+export type SweepEndReason =
+  /** `finish()` was called (the user pressed Finish). */
+  | "finish"
+  /** `maxShots` was reached and the hook auto-finished. */
+  | "maxShots"
+  /** The app left the foreground and the sweep was aborted (shots so far are kept). */
+  | "background";
+
+/**
+ * Sweep-level capture record: identity, timing, the exact config and camera
+ * settings in force, and the level/direction references the frames'
+ * per-tick values are relative to. Built by `start()`, completed by
+ * `finish()`; delivered as `meta` on the hook and as the second argument
+ * of `GuidedSweepCapture`'s `onComplete`.
+ */
+export type SweepCaptureMeta = {
+  /** Random id for this sweep (no external dependency; UUID where the runtime offers one). */
+  id: string;
+  platform: "ios" | "android" | "web" | "other";
+  /** `Date.now()` at `start()`. */
+  startedAt: number;
+  /** `Date.now()` when the sweep ended, `null` while sweeping. */
+  finishedAt: number | null;
+  endedBy: SweepEndReason | null;
+  /** Snapshot of the resolved options at `start()`. */
+  config: GuidedSweepConfig;
+  /**
+   * The level reference `g0` — normalized gravity averaged over the settle
+   * window, device frame. `null` until the settle window completed. Every
+   * frame's `tiltDeg`/`rollDeg`/`tiltMagDeg` is relative to this.
+   */
+  gravityRef: SweepVec3 | null;
+  /** Locked sweep direction at finish (sign of yaw along the sweep), `0` if never locked. */
+  direction: 1 | -1 | 0;
+  /** True when the direction lock re-latched once after a false start. */
+  relatched: boolean;
+  /** Camera settings in force for every frame of the sweep. */
+  camera: {
+    facing: "back";
+    /** expo-camera `zoom` prop (0 = the `CameraView` default the built-in screen uses). */
+    zoom: number;
+    /** `quality` passed to `takePictureAsync`. */
+    photoQuality: number;
+    /** Whether EXIF was requested at `start()` (`GuidedSweepOptions.exif !== false`). */
+    exifRequested: boolean;
+  };
 };
 
 export type SweepPhase = "idle" | "sweeping" | "done";
@@ -72,6 +167,23 @@ export type GuidedSweepOptions = {
    * Default true.
    */
   haptics?: boolean;
+  /**
+   * Request EXIF with every capture (`takePictureAsync({ exif: true })`)
+   * and attach the normalized record as `SweepPhoto.exif` — the source of
+   * the per-frame focal-length prior (`exif.focalPx`). `"full"` also keeps
+   * the raw dictionary (minus maker blobs) as `exif.raw`; `false` skips
+   * EXIF entirely (`exif`/`exifOrientation` are `null`).
+   *
+   * Platform notes: iOS rejects a capture with "Failed to process EXIF
+   * data" when the Exif dictionary is missing — on an EXIF-related
+   * rejection the hook retries that shot once without EXIF and disables
+   * EXIF for the rest of the sweep, so a sweep never stalls (other capture
+   * failures keep the usual behaviour: the target is retried on the next
+   * tick). Android does not rotate the bitmap when EXIF is
+   * requested (it writes the `Orientation` tag instead); the hook swaps
+   * `width`/`height` to upright for you. Default true.
+   */
+  exif?: boolean | "full";
 };
 
 /** {@link GuidedSweepOptions} with every default applied. */
@@ -109,6 +221,13 @@ export type GuidedSweep = {
   isCameraReady: boolean;
   /** The resolved options, for HUD rendering (tick spacing, thresholds…). */
   config: GuidedSweepConfig;
+  /**
+   * Sweep-level record of the most recent sweep started — `null` before the
+   * first `start()`. Refreshed on `start()` and when the sweep ends (never
+   * per sensor tick); `gravityRef` is filled in once the settle window
+   * completes and is visible on the next refresh.
+   */
+  meta: SweepCaptureMeta | null;
 };
 
 /** Overridable copy for the built-in `<GuidedSweepCapture />` overlay. */
@@ -135,8 +254,8 @@ export type GuidedSweepStrings = {
 };
 
 export type GuidedSweepCaptureProps = GuidedSweepOptions & {
-  /** Called with the sweep's photos when the user accepts them. */
-  onComplete: (photos: SweepPhoto[]) => void;
+  /** Called with the sweep's photos and its {@link SweepCaptureMeta} when the user accepts them. */
+  onComplete: (photos: SweepPhoto[], meta: SweepCaptureMeta) => void;
   /** Renders a Cancel affordance when provided. */
   onCancel?: () => void;
   /** Tint for captured ticks, warnings, and primary buttons. Default `#0A84FF`. */

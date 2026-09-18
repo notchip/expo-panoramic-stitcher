@@ -17,6 +17,7 @@ extern NSString *const PanoStitchSuccessKey;      // NSNumber(BOOL)
 extern NSString *const PanoStitchWidthKey;        // NSNumber(int)
 extern NSString *const PanoStitchHeightKey;       // NSNumber(int)
 extern NSString *const PanoStitchUsedIndicesKey;  // NSArray<NSNumber(int)> — input indices actually composited
+extern NSString *const PanoStitchGeometryKey;     // NSString — compact JSON (StitchGeometry v1) or "" when unavailable
 extern NSString *const PanoStitchErrorKey;        // NSString
 
 @interface PanoramaStitcherShim : NSObject
@@ -29,12 +30,16 @@ extern NSString *const PanoStitchErrorKey;        // NSString
 
 /// Stitch the given image files into `outputPath` (JPEG).
 /// Reads/writes via OpenCV directly. Returns a dictionary using the keys above.
+/// `matchNeighbors` 0 = match all pairs (OpenCV default); k > 0 = only pairs
+/// with 0 < |i-j| <= k, plus |i-j| >= n-k when `matchWrap` (ordered sweep ends).
 + (NSDictionary *)stitchImagePaths:(NSArray<NSString *> *)imagePaths
                         outputPath:(NSString *)outputPath
                           warpMode:(NSString *)warpMode
                      blendStrength:(NSInteger)blendStrength
                          matchConf:(float)matchConf
                     panoConfidence:(float)panoConfidence
+                    matchNeighbors:(NSInteger)matchNeighbors
+                         matchWrap:(BOOL)matchWrap
                        outputWidth:(NSInteger)outputWidth
                         autoResize:(BOOL)autoResize
                        jpegQuality:(NSInteger)jpegQuality;

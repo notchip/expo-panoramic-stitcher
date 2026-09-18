@@ -23,7 +23,7 @@ by Expo apps. Two JS entry points (see `package.json` `exports`):
 npm run build      # expo-module build  -> compiles src/ -> build/
 npm run clean      # expo-module clean
 npm run lint       # expo-module lint   (ESLint flat config, eslint.config.js)
-npm test           # expo-module test --passWithNoTests (jest; suite exists)
+npm test           # expo-module test --passWithNoTests (jest; 3 suites, see below)
 npm run prepare    # expo-module prepare (runs on install / before publish)
 ```
 
@@ -42,6 +42,13 @@ Toolchain facts that are easy to break:
   tsc. It is deliberately not in the npm tarball.
 - The tsconfig (module-scripts base) enables `verbatimModuleSyntax` — type
   imports must use `import type`. Also strict + `noUncheckedIndexedAccess`.
+- The jest preset does NOT transform `react-native` — a runtime `import`
+  from `react-native` in a core file breaks every suite that imports
+  `src/index.ts` (the capture entry may import it; it is not under jest).
+  This is why `buildSweepManifest` takes the platform from `meta` only.
+- Jest suites (all native-free): `src/__tests__/stitchSweep.test.ts`
+  (orchestration, manifest, sidecar — native module and `expo-file-system`
+  mocked), `src/__tests__/geometry.test.ts`, `src/__tests__/exifIntrinsics.test.ts`.
 - There is no native build in-tree — iOS/Android compile only inside a host
   app's `expo prebuild` + Xcode/Gradle. To exercise native code, add this
   package as a local module to an Expo app and `npx expo prebuild --clean`.
@@ -69,6 +76,8 @@ Keep changes faithful to those.
 ```
 src/index.ts                 public API: DEFAULTS merge, validation, typed wrappers,
   │                          + stitchSweep (pure-TS sweep orchestration, no native calls of its own)
+  │                          + buildSweepManifest (pure) ; src/geometry.ts (pure pixel<->angle math)
+  │                          ; src/optionalFileSystem.ts (guarded require of expo-file-system, sidecar only)
   └─ requireNativeModule('ExpoPanoramicStitcher')
        ├─ iOS:     ios/ExpoPanoramicStitcherModule.swift   (base64 <-> temp file, own dispatch queue)
        │             └─ ios/PanoramaStitcherShim.{h,mm}    (ObjC++ -> cv::Stitcher, vendored opencv2.xcframework)
@@ -83,6 +92,12 @@ src/capture/                 subpath entry ./capture — camera/sensor UI layer 
 (`cv::imread` → write JPEG). Base64 is decoded to temp files on the way in
 and encoded from the output file on the way out, in Swift/Kotlin. This keeps
 the C++ boundary minimal and the two platforms behaving identically.
+**`file://` normalization is a JS-side invariant:** `stitchImagePaths` (and
+therefore `stitchSweep`, including salvage re-stitches) maps every input
+through the exported `normalizeImagePath()` — `file://` / `file://localhost/`
+URIs (expo-camera's output) become bare percent-decoded paths, anything else
+passes through untouched. Native never sees a URL scheme; do not add scheme
+handling to Swift/Kotlin/C++.
 
 **Symmetric payloads:** `stitchBase64`/`stitchIncrementalBase64` return the
 identical `StitchBase64Result` shape on both platforms (the legacy module
@@ -97,9 +112,35 @@ reintroduce that asymmetry). Native failures REJECT the promise (coded
 `panorama_stitcher_jni.cpp` (JNI — OpenCV ships no Java/Kotlin bindings for
 the stitching module; `org.opencv.stitching.*` does not exist). **The two
 shims contain the same stitch core and must be edited together** (mode
-selection, matcher, blender, warper, resize, imwrite). The Kotlin↔JNI
-protocol is a string: `"ok|<width>|<height>|<idx,idx,...>"` (ascending
-composited input indices) or `"err|<message>"`.
+selection, matcher, matching mask, blender, warper, geometry recompute,
+resize, geometry JSON, imwrite). Both shims also carry a
+`// BEGIN SHARED STITCH-CORE HELPERS … // END SHARED STITCH-CORE HELPERS`
+block (`buildMatchingMask`, `jsonDouble/jsonFloat/jsonInt/jsonBool`,
+`GeometryCamera`, `StitchGeometry`, `computeStitchGeometry`,
+`buildGeometryJson`) that must stay **byte-identical** — check with:
+
+```bash
+diff <(sed -n '/BEGIN SHARED STITCH-CORE HELPERS/,/END SHARED STITCH-CORE HELPERS/p' ios/PanoramaStitcherShim.mm) \
+     <(sed -n '/BEGIN SHARED STITCH-CORE HELPERS/,/END SHARED STITCH-CORE HELPERS/p' android/src/main/cpp/panorama_stitcher_jni.cpp)
+```
+
+Order inside the stitch core is fixed: status OK → sorted COPY of
+`component()` for `usedIndices` (the geometry needs the unsorted order to
+pair with `cameras()`) → `computeStitchGeometry` on the UN-resized pano
+(`selfCheck` compares against it) → the existing resize →
+`buildGeometryJson` (adds the output affine from final vs composite size) →
+imwrite → return. Geometry never fails a successful stitch (try/catch → empty
+string). Number formatting in the JSON must stay locale-safe (`snprintf`
+`%.17g`/`%.9g` + comma→dot, non-finite → `null`; never
+`std::to_string(double)`).
+
+The Kotlin↔JNI protocol is a string with FIVE segments:
+`"ok|<width>|<height>|<idx,idx,...>|<geometryJson>"` (ascending composited
+input indices, then the geometry JSON — always the LAST segment, possibly
+empty; Kotlin splits with `limit = 5` and `parts.getOrNull(4) ?: ""`) or
+`"err|<message>"`. iOS returns the same data as an NSDictionary
+(`PanoStitchGeometryKey` = `"geometryJson"`); both Swift records carry
+`@Field geometryJson: String`.
 
 **Threading:** stitching is CPU-bound for seconds-to-minutes. iOS uses
 `.runOnQueue(stitchQueue)` (dedicated serial queue), Android a single-thread
@@ -139,6 +180,26 @@ gyro-integrated yaw), ported from a field-tested app screen. Rules:
   try/catch in `optionalDeps.ts` — Metro's `allowOptionalDependencies`
   (Expo default) depends on exactly that pattern, so never convert those to
   static imports.
+- **The capture record is additive-only.** `SweepPhoto` carries, besides
+  `uri`/`width`/`height`/`yawDeg`, the trigger tick (`tiltDeg`, `rollDeg`,
+  `tiltMagDeg`, `rateDegS`, `gravity`, `sensorTs`), timing (`triggeredAt`,
+  `resolvedAt`, `yawDegAtResolve`) and EXIF (`exifOrientation`, `exif`);
+  `SweepCaptureMeta` (`meta` on the hook, second arg of `onComplete`) is
+  written only at `start()`, once at settle (`gravityRef`) and at sweep end
+  — never per tick. Fields are pure COPIES of values `onMotion` already
+  computes; never add a field that requires new sensor math or changes a
+  gate. Every field name must be mirrored as an OPTIONAL field on the core
+  `SweepInputPhoto` / `SweepCaptureMetaInput` (see sweep orchestration).
+- `SweepPhoto.width/height` are **upright on both platforms** — the
+  Android-only swap in `doCapture` exists because expo-camera skips the
+  bitmap rotation when `exif: true` (it writes `Orientation` 6/8 instead);
+  iOS must NOT be swapped (`UIImage.size` is already orientation-aware while
+  the injected `Orientation` tag still says 6/8). `exif` defaults to `true`;
+  a capture rejected with an EXIF-related error (`isExifFailure`, message
+  matches /exif/i) while EXIF was requested is retried once without it and
+  EXIF is disabled for the rest of that sweep; other failures keep the
+  pre-existing retry-next-tick behaviour. `exifIntrinsics.ts` is pure and
+  import-free (`normalizeExif`, `deriveFocalPx`, `readExifOrientation`).
 
 ## Sweep orchestration (`stitchSweep`, core entry)
 
@@ -153,37 +214,121 @@ connects the loop, but OpenCV's high-level Stitcher keeps one maximal arc
 and has no concept of a circular chain. Hence:
 
 - **Wrap closure:** yaw span ≥ 330° → re-append copies of the first two
-  photos so the chain sees its own loop; `wrapClosed: true` = trailing edge
-  duplicates the start (caller may crop). Duplicate indices are mapped back
-  to their source photos everywhere.
+  photos so the chain sees its own loop, and `matchWrap` defaults to
+  `wrapClosed` (`options.matchWrap ?? wrapClosed`, sent on the primary AND
+  the salvage stitch; `matchNeighbors` passes through unchanged). Duplicate
+  indices are mapped back to their source photos everywhere. **`wrapClosed`
+  does NOT mean a duplicated trailing edge:** under OpenCV's rotation model
+  (`u = warpScale·atan2`, one turn) the duplicates land ON their sources
+  rather than widening the canvas — never document "caller may crop".
+  `wrapClosure` (`measureWrapClosure`) MEASURES the loop drift from
+  duplicate/source camera pairs (`inputIndex >= n` ↔ `inputIndex − n`) and is
+  `null` unless at least one pair was composited with geometry available.
 - **Arc salvage:** one re-stitch of the dropped complement (same options,
   order preserved); all strips returned largest-first in `strips`; a failed
   complement is not an error.
-- **Gap feedback:** `gaps` = yaw ranges of dropped-and-unsalvaged photos.
-- Defaults `warpMode: 'cylindrical'` + `panoConfidence: 0.7`; `'plane'` is
-  rejected (an affine projection can't exceed ~120° FOV — it stays available
-  via `stitchImagePaths` for diagnostics); a failed `spherical` stitch falls
-  back to cylindrical **exactly once** (`fellBackToCylindrical`), never
-  auto-retries beyond that.
+- **Gap feedback:** `gaps` = yaw ranges of dropped-and-unsalvaged photos;
+  `yawSpanDeg` = `max − min` of `photos[].yawDeg` (the wrap gate value).
+- **Tagged geometry:** each strip carries `geometry` (`SweepStripGeometry`:
+  cameras tagged `photoIndex` — `toCanonical(inputIndex)` for the primary,
+  `dropped[inputIndex]` for the salvage strip; a wrap-closed primary holds
+  the same `photoIndex` twice) and `coverage` (`coverageFromGeometry`).
+- **Manifest + sidecar:** `buildSweepManifest(photos, stitch, meta?)` is pure
+  (no I/O, no `react-native`; `platform` = `meta.platform ?? "unknown"`).
+  `stitchSweep` always returns `manifest` and then, unless `sidecar: false`,
+  writes it best-effort to `options.sidecar.path ?? <strips[0].path with
+  .json>` via `writeTextFile` from `src/optionalFileSystem.ts`. ANY failure
+  → `sidecarPath: null` + `sidecarError: message`; it must never reject and
+  never touch `success`. `manifest.photos` are the canonical n photos (never
+  the wrap-extended input), each `{ index, uri, path: normalizeImagePath(uri),
+  ...everything the caller passed }`; `manifest.stitch.options` is exactly
+  `{ ...DEFAULTS, ...sweepOptions, warpMode: warpModeUsed }` — what native
+  received for the successful primary stitch. `meta` and `sidecar` are
+  destructured OUT of the options before they reach native.
+- **`src/optionalFileSystem.ts`** loads `expo-file-system` lazily via a
+  literal `require("expo-file-system")` inside try/catch (same
+  `declare const require` + Metro `allowOptionalDependencies` rationale as
+  `src/capture/optionalDeps.ts`) — never a static import, never a computed
+  module id. `expo-file-system` is an `optional: true` peer (every Expo app
+  has it through `expo`; NOT a devDependency here). `writeTextFile` builds
+  `new File(uri).write(text)` where `uri` = the path if it already has a
+  scheme else `file://` + percent-encoded path (iOS rejects scheme-less
+  paths; `File.write` is synchronous in SDK 56/57 and creates the file but
+  not parent dirs).
+- **Core mirror types:** `SweepInputPhoto` (optional fields),
+  `SweepInputPhotoExif`, `SweepInputVec3`, `SweepCaptureMetaInput` (all
+  optional except `id`/`startedAt`) and `SweepCaptureConfigInput` DUPLICATE
+  the capture entry's shapes field-for-field so capture output is assignable
+  — the core must not import `src/capture/`, not even `import type`. When
+  the capture record changes, update both sides.
+- Defaults `warpMode: 'cylindrical'` + `panoConfidence: 0.7` +
+  `autoResize: false` (a sweep is never stretched to 2:1; callers opt back in
+  explicitly); `'plane'` is rejected (an affine projection can't exceed ~120°
+  FOV — it stays available via `stitchImagePaths` for diagnostics); a failed
+  `spherical` stitch falls back to cylindrical **exactly once**
+  (`fellBackToCylindrical`), never auto-retries beyond that.
 
-Covered by `src/__tests__/stitchSweep.test.ts` (jest, native module mocked).
-Run `npm test` after touching it.
+Covered by `src/__tests__/stitchSweep.test.ts` (jest, native module and
+`expo-file-system` mocked). Run `npm test` after touching it.
+
+## Geometry interpretation (`src/geometry.ts`)
+
+Pure TS, no native calls, never imports `src/capture/`. Native reports ONLY
+the raw camera model (`K`, `R`, `warpScale`, `origin`, ROIs, output affine);
+angles (yaw/pitch/roll, azimuth/elevation), coverage on the circle and the
+gyro fit are derived HERE — do not add angle math to the shims. Conventions
+(OpenCV's, verified against `warpers_inl.hpp`): `R` camera-to-world, camera
+frame x right / y DOWN / z forward, `u = warpScale·atan2(x, z)`, spherical
+`v = warpScale·(π − acos(y/|p|))`, cylindrical `v = warpScale·y/hypot(x, z)`;
+composite pixel = global − origin; output pixel = `output` affine. `affine`
+composites (`warpMode: 'plane'`) → the angle helpers return `null`
+(`imagePointToPano` replays `AffineWarper`). Coverage uses `yaw ± hfov/2`
+(`hfov = 2·atan(srcWidth/(2·focal))`), never ROI widths (a seam-straddling
+ROI spans the whole canvas). `parseGeometry` never throws (validates `v === 1`,
+projection, finite numbers, 9-entry `R`; anything else → `null`). Covered by
+`src/__tests__/geometry.test.ts`.
+
+Verified OpenCV 4.13 facts the native geometry relies on: `cameras()` are at
+registration scale and `composePanorama` scales a private copy by
+`1/workScale` (`compose_scale` is 1 because `compositingResol()` defaults to
+`ORIG_RESOL`); `cameras()[k]` pairs with the UNSORTED `component()[k]`;
+`warped_image_scale_` is private but equals the median focal with `(float)`
+casts; `MultiBandBlender` crops to `resultRoi(corners, sizes)` exactly, hence
+`selfCheck`. Setting a compositing resolution or swapping the blender would
+make `selfCheck` report `false` (geometry approximate), not crash.
 
 ## Adding or changing a native method
 
 A method must be kept in sync across **five** places or it will break:
 
-1. `src/ExpoPanoramicStitcher.types.ts` — shared types.
-2. `src/ExpoPanoramicStitcherModule.ts` — the `declare class` signature.
+1. `src/ExpoPanoramicStitcher.types.ts` — shared types. Result types come in
+   pairs: `Native*` (what native resolves: raw `geometryJson: string`) vs
+   the public `StitchResult` / `StitchBase64Result` (`geometry:
+   StitchGeometry | null`). Options: `matchNeighbors`, `matchWrap` live in
+   `StitchOptions` next to the older fields.
+2. `src/ExpoPanoramicStitcherModule.ts` — the `declare class` signature
+   (returns the `Native*` types).
 3. `src/index.ts` — public wrapper (DEFAULTS merge + validation live here,
-   not in native).
+   not in native; DEFAULTS include `matchNeighbors: 0`, `matchWrap: false`);
+   the wrappers convert via `parseGeometry` (`toStitchResult` /
+   `toStitchBase64Result`).
 4. `ios/ExpoPanoramicStitcherModule.swift` — `Function`/`AsyncFunction` in
-   `definition()`; native `Record` structs mirror the TS types.
+   `definition()`; native `Record` structs mirror the TS types
+   (`StitchOptions` fields incl. `matchNeighbors`/`matchWrap`; both result
+   records carry `geometryJson`); the shim method signature in
+   `PanoramaStitcherShim.h/.mm` is `…panoConfidence:matchNeighbors:matchWrap:
+   outputWidth:autoResize:jpegQuality:`.
 5. `android/.../ExpoPanoramicStitcherModule.kt` — matching function; options
-   arrive as `Map<String, Any?>` parsed via `StitchOptions.from(map)`.
+   arrive as `Map<String, Any?>` parsed via `StitchOptions.from(map)`;
+   `external fun nativeStitch` and the JNI `Java_…_nativeStitch` signature
+   must match parameter order EXACTLY: `…, panoConfidence, matchNeighbors,
+   matchWrap, outputWidth, autoResize, jpegQuality`; result maps carry
+   `geometryJson`.
 
 If the change touches the stitch core itself, the **two C++ shims** are a
-sixth and seventh place — keep them identical. Update the web stub too.
+sixth and seventh place — keep them identical (and the SHARED block
+byte-identical). Update the web stub too (it returns the raw native shape:
+`geometryJson: ""`, `success: false`).
 `expo-module.config.json` registers the module classes; the native module
 name string (`"ExpoPanoramicStitcher"`) must match in the Swift `Name(...)`,
 Kotlin `Name(...)`, and `requireNativeModule(...)`.
@@ -245,6 +390,17 @@ Kotlin `Name(...)`, and `requireNativeModule(...)`.
   count (clamped). Stitch failures map `Stitcher::Status` to distinct
   messages (NEED_MORE_IMGS / HOMOGRAPHY_EST_FAIL /
   CAMERA_PARAMS_ADJUST_FAIL), identical text on both platforms.
+- `matchNeighbors > 0` builds an n×n CV_8U mask (symmetric, zero diagonal;
+  pairs `0 < |i−j| ≤ k`, plus `|i−j| ≥ n−k` when `matchWrap`) and calls
+  `setMatchingMask` before `stitch()`; `0` = no mask (OpenCV default).
+  Identical-image pairs (a photo vs its wrap duplicate) are harmless: OpenCV
+  zeroes confidence > 3 for near-identical images.
+- `computeStitchGeometry` re-runs `warper->warpRoi` per composited image.
+  That is cheap: OpenCV's `CylindricalWarper`/`SphericalWarper` implement
+  `detectResultRoi` by walking the image BORDER (`detectResultRoiByBorder`,
+  ~2·(w+h) `mapForward` calls per image; spherical adds two pole checks),
+  not the full image. Do not hand-roll the ROI from four corners or from
+  `roi.width` assumptions — use the warper so `selfCheck` stays exact.
 - OpenCV stitching needs ~30–40% overlap between adjacent images or it
   returns a non-OK status, surfaced as a rejected promise.
 - `autoResize` forces an equirectangular 2:1 output
@@ -257,7 +413,10 @@ Kotlin `Name(...)`, and `requireNativeModule(...)`.
   `done`). Keep stage names identical across platforms.
 - All temp files are written under a `pano-stitch/` temp dir and cleaned up
   in `defer`/`finally` blocks — including when a later input fails to decode.
-  Keep that cleanup when adding code paths.
+  Keep that cleanup when adding code paths. The OUTPUT panorama (and the
+  sweep sidecar next to it) also live there and are purgeable by the OS —
+  the README tells consumers to copy photos + pano + sidecar to a document
+  directory; the module never does that itself.
 - Known, documented asymmetries module code cannot fully fix: (1) iOS wraps
   thrown errors in `FunctionCallException` and does not attach `error.code`
   on async rejections, while Android rejects the raw coded exception — the

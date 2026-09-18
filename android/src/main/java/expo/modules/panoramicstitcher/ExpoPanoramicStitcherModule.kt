@@ -12,7 +12,10 @@ import java.util.concurrent.Executors
 
 class StitchException(message: String) : CodedException(message)
 
-/** JNI surface for the C++ stitch shim (src/main/cpp/panorama_stitcher_jni.cpp). */
+/**
+ * JNI surface for the C++ stitch shim (src/main/cpp/panorama_stitcher_jni.cpp).
+ * Parameter order must match the JNI function signature exactly.
+ */
 private object PanoramaStitcherNative {
   init {
     System.loadLibrary("panostitcher")
@@ -27,6 +30,8 @@ private object PanoramaStitcherNative {
     blendStrength: Int,
     matchConf: Float,
     panoConfidence: Float,
+    matchNeighbors: Int,
+    matchWrap: Boolean,
     outputWidth: Int,
     autoResize: Boolean,
     jpegQuality: Int
@@ -34,15 +39,17 @@ private object PanoramaStitcherNative {
 }
 
 /**
- * Panorama stitcher. OpenCV comes from Maven Central (org.opencv:opencv) — native
- * .so libs bundled automatically, no manual SDK download. The AAR has no Java
- * bindings for the stitching module, so stitching runs through one small JNI shim
- * compiled against the AAR's prefab C++ headers (mirrors the iOS ObjC++ shim).
+ * Panorama stitcher. OpenCV is statically linked from the official OpenCV Android
+ * SDK (downloaded once by a Gradle task, see build.gradle / CMakeLists.txt) into
+ * the single JNI shim `libpanostitcher.so` — the Maven AAR is not usable because
+ * its libopencv_java4.so does not compile the stitching module in, and OpenCV
+ * ships no Java/Kotlin bindings for it anyway. The shim mirrors the iOS ObjC++
+ * shim; the two contain the same stitch core.
  */
 class ExpoPanoramicStitcherModule : Module() {
 
-  // Touching PanoramaStitcherNative triggers System.loadLibrary; libopencv_java4.so
-  // loads automatically as a DT_NEEDED dependency.
+  // Touching PanoramaStitcherNative triggers System.loadLibrary("panostitcher") —
+  // the only native load (OpenCV is linked statically; OpenCVLoader is not used).
   private val nativeReady: Boolean by lazy {
     runCatching { PanoramaStitcherNative.nativeVersion() }.isSuccess
   }
@@ -142,16 +149,20 @@ class ExpoPanoramicStitcherModule : Module() {
       opts.blendStrength,
       opts.matchConf,
       opts.panoConfidence,
+      opts.matchNeighbors,
+      opts.matchWrap,
       opts.outputWidth,
       opts.autoResize,
       opts.jpegQuality
     )
 
-    // Shim protocol: "ok|<width>|<height>|<idx,idx,...>" or "err|<message>".
+    // Shim protocol: "ok|<width>|<height>|<idx,idx,...>|<geometryJson>" or
+    // "err|<message>". The geometry JSON is always the LAST segment (empty when
+    // unavailable), hence the split limit — never split it further.
     if (!raw.startsWith("ok|")) {
       throw StitchException(raw.removePrefix("err|"))
     }
-    val parts = raw.split("|")
+    val parts = raw.split("|", limit = 5)
     val width = parts[1].toInt()
     val height = parts[2].toInt()
     val usedIndices = parts.getOrNull(3)
@@ -159,6 +170,7 @@ class ExpoPanoramicStitcherModule : Module() {
       ?.split(",")
       ?.map { it.toInt() }
       ?: emptyList()
+    val geometryJson = parts.getOrNull(4) ?: ""
 
     return mapOf(
       "success" to true,
@@ -168,6 +180,7 @@ class ExpoPanoramicStitcherModule : Module() {
       "aspectRatio" to if (height > 0) width.toDouble() / height else 0.0,
       "usedIndices" to usedIndices,
       "usedCount" to usedIndices.size,
+      "geometryJson" to geometryJson,
       "errorMessage" to ""
     )
   }
@@ -188,6 +201,7 @@ class ExpoPanoramicStitcherModule : Module() {
         "height" to (result["height"] ?: 0),
         "usedIndices" to (result["usedIndices"] ?: emptyList<Int>()),
         "usedCount" to (result["usedCount"] ?: 0),
+        "geometryJson" to (result["geometryJson"] ?: ""),
         "errorMessage" to ""
       )
     } finally {
@@ -211,6 +225,7 @@ class ExpoPanoramicStitcherModule : Module() {
       "height" to bounds.outHeight,
       "usedIndices" to listOf(0),
       "usedCount" to 1,
+      "geometryJson" to "", // pass-through: no stitch, no geometry
       "errorMessage" to ""
     )
   }
@@ -268,6 +283,8 @@ private data class StitchOptions(
   val blendStrength: Int,
   val matchConf: Float,
   val panoConfidence: Float,
+  val matchNeighbors: Int,
+  val matchWrap: Boolean,
   val outputWidth: Int,
   val autoResize: Boolean,
   val jpegQuality: Int
@@ -278,6 +295,8 @@ private data class StitchOptions(
       blendStrength = (map["blendStrength"] as? Number)?.toInt() ?: 5,
       matchConf = (map["matchConf"] as? Number)?.toFloat() ?: 0.3f,
       panoConfidence = (map["panoConfidence"] as? Number)?.toFloat() ?: 1.0f,
+      matchNeighbors = (map["matchNeighbors"] as? Number)?.toInt() ?: 0,
+      matchWrap = map["matchWrap"] as? Boolean ?: false,
       outputWidth = (map["outputWidth"] as? Number)?.toInt() ?: 4096,
       autoResize = map["autoResize"] as? Boolean ?: true,
       jpegQuality = (map["jpegQuality"] as? Number)?.toInt() ?: 95

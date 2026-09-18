@@ -3,6 +3,127 @@
 Notable changes to `@notchip/expo-panoramic-stitcher`. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.7.0] — 2026-09-17
+
+### Added
+
+- **Stitch geometry on every result** — `geometry: StitchGeometry | null` on
+  `StitchResult` / `StitchBase64Result`: per composited image its intrinsics
+  `K` (`focal`, `ppx`, `ppy`, `aspect`) and camera-to-world rotation `R` at
+  the input's pixel scale, `warpScale` (pixels per radian), the canvas
+  `origin`, the un-resized composite size, `selfCheck`, and the
+  composite→output affine (`output: { sx, sy, tx, ty }`), recovered natively
+  by replaying `cv::Stitcher::composePanorama` — the same C++ on both
+  platforms. Geometry never fails a successful stitch (`null` when it could
+  not be recovered; always `null` for the incremental first-frame
+  pass-through). The raw native module still resolves it as a compact
+  `geometryJson: string` (`NativeStitchResult` / `NativeStitchBase64Result`).
+- **`src/geometry.ts`** (pure TS, re-exported from the core entry):
+  `parseGeometry`, `cameraAngles`, `panoPixelToAngles`, `anglesToPanoPixel`,
+  `imagePointToPano`, `cameraAzimuthIntervalDeg`, `coverageFromGeometry`,
+  `fitGyroToPano`, `wrapDeg` — pixel↔angle conversion, azimuth coverage on
+  the circle and a gyro-to-pano fit (`panoAzimuth ≈ sign·gyroYaw + offset`).
+  Types: `StitchGeometry`, `StitchCamera`, `StitchProjection`, `Mat3`,
+  `PixelRect`, `CameraAngles`, `PanoAngles`, `PanoPoint`, `AzimuthInterval`,
+  `SweepCoverage`, `GyroPanoFit`, `GyroPanoResidual`.
+- **`StitchOptions.matchNeighbors`** (default `0`) and **`matchWrap`**
+  (default `false`): neighbour-only feature matching via
+  `setMatchingMask` (`0 < |i−j| ≤ k`, plus `|i−j| ≥ n−k` when `matchWrap`);
+  `stitchSweep` defaults `matchWrap` to its `wrapClosed` flag.
+- **`stitchSweep` additions:** `strips[].geometry` (`SweepStripGeometry` —
+  cameras tagged with the canonical `photoIndex`), `strips[].coverage`,
+  top-level `geometry` (= `strips[0].geometry`), `wrapClosure`
+  (`{ closureErrorDeg, pairs }` — the measured loop-closure error from the
+  re-appended duplicates, or `null`), `yawSpanDeg` (gyro yaw span of the
+  sweep), and the **sweep manifest**: `manifest: SweepManifest` (always, in
+  memory — `schemaVersion: 1`, `generator`, `createdAt`, `platform`,
+  `sweep` = the capture `meta`, `photos[]` with `index` + normalized `path`
+  + every field the caller passed, `stitch` with strips/geometry/coverage/
+  gaps/wrap info and the exact resolved `options` sent to native) plus a
+  **best-effort JSON sidecar** written as `<pano>.json` next to the primary
+  strip with `expo-file-system` (`sidecarPath` / `sidecarError`; `sidecar:
+  false` skips it, `sidecar: { path }` relocates it; a failed write never
+  rejects). New options `StitchSweepOptions.meta` and `sidecar`; exported
+  `buildSweepManifest()`, `toFileUri()`; types `SweepManifest`,
+  `SweepManifestPhoto`, `SweepManifestStitch`, `SweepCaptureMetaInput`,
+  `SweepCaptureConfigInput`, `SweepInputPhotoExif`, `SweepInputVec3`,
+  `SweepInputEndReason`, `SweepStripCamera`, `SweepStripGeometry`,
+  `SweepWrapClosure`, `SweepWrapClosurePair`.
+- **`SweepInputPhoto`** (core) gained optional fields mirroring the capture
+  record one-to-one (`width`, `height`, `tiltDeg`, `rollDeg`, `tiltMagDeg`,
+  `rateDegS`, `gravity`, `sensorTs`, `triggeredAt`, `resolvedAt`,
+  `yawDegAtResolve`, `exifOrientation`, `exif`) so a captured sweep passes
+  straight through into the manifest. The core entry still imports nothing
+  from `/capture` — the shapes are duplicated on purpose.
+- **`expo-file-system`** is a new **optional** peer dependency (`>=56.0.0`,
+  guarded `require`; every Expo app already ships it via `expo`). Used only
+  for the manifest sidecar.
+- **capture:** `SweepPhoto` now records the trigger tick — `tiltDeg`,
+  `rollDeg`, `tiltMagDeg`, `rateDegS`, `gravity`, `sensorTs`, `triggeredAt`,
+  `resolvedAt`, `yawDegAtResolve` (shutter-latency bracket),
+  `exifOrientation`, `exif`.
+- **capture:** `SweepCaptureMeta` — per-sweep `id`, `platform`, start/finish
+  times, `endedBy` (`finish` | `maxShots` | `background`), config snapshot,
+  `gravityRef` (settle-window g0), locked `direction`, `relatched`, camera
+  settings. Exposed as `meta` on `useGuidedSweep()` and as the second
+  argument of `GuidedSweepCapture`'s `onComplete(photos, meta)`.
+- **capture:** `exif` option (default `true`; `"full"` keeps the raw
+  dictionary minus maker blobs) requests EXIF per capture; new pure helpers
+  `normalizeExif()`, `deriveFocalPx()`, `readExifOrientation()`, constant
+  `FULL_FRAME_DIAGONAL_MM` and type `SweepPhotoExif`, giving a per-frame
+  pixel focal-length prior (`exif.focalPx`, diagonal 35 mm equivalence on
+  the full 4:3 frame, ≈ ±5 %).
+- Tests: `src/__tests__/geometry.test.ts`, `src/__tests__/exifIntrinsics.test.ts`,
+  and manifest/sidecar/geometry cases in `src/__tests__/stitchSweep.test.ts`
+  (63 tests total, native module and `expo-file-system` mocked).
+
+### Changed
+
+- **`stitchSweep` no longer stretches a sweep to 2:1:** it now defaults
+  `autoResize: false` (the strip keeps its natural aspect and is only
+  downscaled to `outputWidth`); pass `autoResize: true` to opt back in.
+  `stitchImagePaths` / `stitchBase64` keep `autoResize: true`.
+- **`wrapClosed` semantics corrected:** it means the first two photos were
+  re-appended so the matcher sees the chain's own loop (and `matchWrap`
+  defaults to `true`). It does **not** mean the trailing edge duplicates the
+  start — under OpenCV's rotation model the duplicates land on their sources,
+  so do not crop; use `wrapClosure` / `strips[0].coverage` instead.
+- **capture (Android): EXIF orientation behaviour.** With `exif: true`
+  (now the default) expo-camera on Android does not rotate the bitmap upright
+  and reports raw sensor dims with `Orientation` 6/8 on the file; the hook now
+  swaps `width`/`height` when `exifOrientation` is 5–8 so
+  `SweepPhoto.width/height` are guaranteed **upright on both platforms** (iOS
+  already reports orientation-aware dims and is left alone). `cv::imread`
+  honours the tag, so stitching is unaffected.
+- **capture:** a capture rejected with an EXIF-related error while EXIF was
+  requested (iOS `Failed to process EXIF data`) is retried once without EXIF
+  and EXIF is disabled for the rest of that sweep; other capture failures
+  behave as before (target retried on the next tick).
+- **Native protocol** (requires `npx expo prebuild --clean`): the Android
+  Kotlin↔JNI string is now `ok|<w>|<h>|<idx,...>|<geometryJson>` (geometry is
+  the LAST segment, possibly empty; Kotlin splits with `limit = 5`); the iOS
+  shim dictionary gains `geometryJson`; both native `StitchOptions` gain
+  `matchNeighbors` / `matchWrap`. Old native + new JS (or vice versa) degrade
+  to `geometry: null`, never a crash.
+- **Typing:** `geometry` is a required field on `StitchResult` /
+  `StitchBase64Result`, and `manifest` / `sidecarPath` / `sidecarError` on
+  `StitchSweepResult`; `SweepPhoto` (capture) gained required fields. Code
+  that constructs these literals by hand (mocks, fixtures) must add them;
+  readers are unaffected.
+- Sensor math, gates and every pre-existing `GUIDED_SWEEP_DEFAULTS` value are
+  unchanged; `exif: true` is the only new default key.
+
+### Fixed
+
+- **`file://` URIs are accepted as input.** `stitchImagePaths` / `stitchSweep`
+  now normalize `file://` (and `file://localhost/`) URIs — what expo-camera's
+  `takePictureAsync` returns on both platforms — to bare, percent-decoded
+  paths before the native call (`normalizeImagePath()` is exported).
+  Previously `cv::imread` received the URL string and the stitch failed with
+  `Failed to read image: file:///…`. Salvage re-stitches are normalized too.
+- Stale Kotlin KDoc claiming OpenCV comes from the Maven AAR corrected (it is
+  statically linked from the official SDK, as documented since 0.3.0).
+
 ## [0.6.0] — 2026-09-01
 
 ### Added

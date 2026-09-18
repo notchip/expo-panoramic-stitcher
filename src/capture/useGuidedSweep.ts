@@ -31,7 +31,7 @@
  * drift across a sweep — OpenCV's gain compensation absorbs moderate
  * drift.
  */
-import type { CameraView } from "expo-camera";
+import type { CameraCapturedPicture, CameraView } from "expo-camera";
 import { DeviceMotion, type DeviceMotionMeasurement } from "expo-sensors";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, Platform } from "react-native";
@@ -42,9 +42,13 @@ import {
   type GuidedSweepConfig,
   type GuidedSweepHud,
   type GuidedSweepOptions,
+  type SweepCaptureMeta,
+  type SweepEndReason,
   type SweepPhase,
   type SweepPhoto,
+  type SweepVec3,
 } from "./GuidedSweep.types";
+import { normalizeExif, readExifOrientation } from "./exifIntrinsics";
 import { hapticShotFeedback } from "./optionalDeps";
 
 export const GUIDED_SWEEP_DEFAULTS: GuidedSweepConfig = {
@@ -61,10 +65,56 @@ export const GUIDED_SWEEP_DEFAULTS: GuidedSweepConfig = {
   sensorIntervalMs: 33,
   photoQuality: 0.9,
   haptics: true,
+  exif: true, // per-frame EXIF → focal-length prior (see GuidedSweepOptions.exif)
 };
 
 const rad2deg = 57.29577951308232;
 const clamp1 = (v: number) => Math.max(-1, Math.min(1, v));
+
+/**
+ * Sensor readings of the tick that fired a capture. Pure copies of values
+ * onMotion already computes — recorded on the SweepPhoto so consumers can
+ * relate each frame to the sweep's level/direction references.
+ */
+type TriggerSample = {
+  tiltDeg: number;
+  rollDeg: number;
+  tiltMagDeg: number;
+  rateDegS: number;
+  gravity: SweepVec3;
+  sensorTs: number;
+};
+
+/** True for expo-camera's EXIF processing rejection (iOS "Failed to process EXIF data"). */
+function isExifFailure(e: unknown): boolean {
+  const msg =
+    e instanceof Error ? e.message : typeof e === "string" ? e : String(e);
+  return /exif/i.test(msg);
+}
+
+/** Dependency-free sweep id: a UUID where the runtime has one, else time + entropy. */
+function randomId(): string {
+  try {
+    const g = globalThis as { crypto?: { randomUUID?: () => string } };
+    const c = g.crypto;
+    if (c && typeof c.randomUUID === "function") return c.randomUUID();
+  } catch {
+    // fall through to the portable id
+  }
+  const entropy = () => Math.random().toString(36).slice(2, 10);
+  return `${Date.now().toString(36)}-${entropy()}${entropy()}`;
+}
+
+function platformName(): SweepCaptureMeta["platform"] {
+  switch (Platform.OS) {
+    case "ios":
+    case "android":
+    case "web":
+      return Platform.OS;
+    default:
+      return "other";
+  }
+}
 
 const INITIAL_HUD: GuidedSweepHud = {
   yawDeg: 0,
@@ -107,12 +157,32 @@ export function useGuidedSweep(options: GuidedSweepOptions = {}): GuidedSweep {
     active: false,
     hudTick: 0,
     lastStatus: "" as SweepStatus | "",
+    exifDisabled: false, // set when a capture rejected with EXIF requested (iOS "Failed to process EXIF data")
   });
 
-  const finish = useCallback(() => {
-    motion.current.active = false;
+  // Sweep-level record. Written only in start() / settle / endSweep() —
+  // never per sensor tick — and mirrored into `meta` state on start/end.
+  const metaRef = useRef<SweepCaptureMeta | null>(null);
+  const [meta, setMeta] = useState<SweepCaptureMeta | null>(null);
+
+  const endSweep = useCallback((endedBy: SweepEndReason) => {
+    const st = motion.current;
+    const wasActive = st.active;
+    st.active = false;
+    const m = metaRef.current;
+    // Only a live sweep's end is recorded: finish() from idle/done must not
+    // restamp a previous (or abandoned) sweep's record.
+    if (m && wasActive) {
+      m.finishedAt = Date.now();
+      m.endedBy = endedBy;
+      m.direction = st.dir > 0 ? 1 : st.dir < 0 ? -1 : 0;
+      m.relatched = st.relatchUsed;
+      setMeta({ ...m });
+    }
     setPhase("done");
   }, []);
+
+  const finish = useCallback(() => endSweep("finish"), [endSweep]);
 
   const start = useCallback(() => {
     const st = motion.current;
@@ -133,6 +203,27 @@ export function useGuidedSweep(options: GuidedSweepOptions = {}): GuidedSweep {
     st.active = true;
     st.hudTick = 0;
     st.lastStatus = "";
+    st.exifDisabled = false;
+    const cfg = cfgRef.current;
+    const m: SweepCaptureMeta = {
+      id: randomId(),
+      platform: platformName(),
+      startedAt: Date.now(),
+      finishedAt: null,
+      endedBy: null,
+      config: { ...cfg },
+      gravityRef: null,
+      direction: 0,
+      relatched: false,
+      camera: {
+        facing: "back",
+        zoom: 0, // CameraView default; the built-in screen never sets `zoom`
+        photoQuality: cfg.photoQuality,
+        exifRequested: cfg.exif !== false,
+      },
+    };
+    metaRef.current = m;
+    setMeta({ ...m });
     setShots([]);
     setHud(INITIAL_HUD);
     setPhase("sweeping");
@@ -159,24 +250,80 @@ export function useGuidedSweep(options: GuidedSweepOptions = {}): GuidedSweep {
     }
   };
 
-  const doCapture = async (yawAtTrigger: number, gen: number) => {
+  const doCapture = async (
+    yawAtTrigger: number,
+    gen: number,
+    sample: TriggerSample,
+  ) => {
     const st = motion.current;
+    const cfg = cfgRef.current;
+    const quality = cfg.photoQuality;
+    let withExif = cfg.exif !== false && !st.exifDisabled;
+    const triggeredAt = Date.now();
     try {
-      const photo = await cameraRef.current?.takePictureAsync({
-        quality: cfgRef.current.photoQuality,
-      });
+      let photo: CameraCapturedPicture | undefined;
+      try {
+        photo = await cameraRef.current?.takePictureAsync(
+          withExif ? { quality, exif: true } : { quality },
+        );
+      } catch (e) {
+        // iOS rejects with "Failed to process EXIF data" when the Exif
+        // dictionary is missing from the capture metadata. Only for an
+        // EXIF-related rejection: retry this shot once without EXIF and stop
+        // asking for the rest of the sweep so it never stalls on a device
+        // that can't supply it. Any other failure keeps the pre-existing
+        // behaviour (target stays uncaptured, the gates retry next tick) so
+        // a transient camera error never silently drops EXIF for the sweep.
+        if (!withExif || gen !== st.gen || !isExifFailure(e)) throw e;
+        st.exifDisabled = true;
+        withExif = false;
+        photo = await cameraRef.current?.takePictureAsync({ quality });
+      }
+      const resolvedAt = Date.now();
       if (gen !== st.gen) return; // reset/redo/unmount raced the shutter — drop it
       if (photo) {
+        const yawDegAtResolve = st.yaw;
+        const rawExif: unknown = withExif ? photo.exif : null;
+        const exifOrientation = readExifOrientation(rawExif);
+        let { width, height } = photo;
+        // With EXIF requested, Android's expo-camera skips the upright
+        // rotation of the bitmap (ResolveTakenPicture.decodeBitmap) and
+        // reports the RAW dims while the file carries Orientation 6/8 for
+        // a portrait shot. iOS reports UIImage.size, which is already
+        // orientation-aware, so only Android needs the swap.
+        if (
+          Platform.OS === "android" &&
+          exifOrientation !== null &&
+          exifOrientation >= 5 &&
+          exifOrientation <= 8
+        ) {
+          [width, height] = [height, width];
+        }
         st.shotCount += 1;
         const rec: SweepPhoto = {
           uri: photo.uri,
-          width: photo.width,
-          height: photo.height,
+          width,
+          height,
           yawDeg: yawAtTrigger,
+          tiltDeg: sample.tiltDeg,
+          rollDeg: sample.rollDeg,
+          tiltMagDeg: sample.tiltMagDeg,
+          rateDegS: sample.rateDegS,
+          gravity: sample.gravity,
+          sensorTs: sample.sensorTs,
+          triggeredAt,
+          resolvedAt,
+          yawDegAtResolve,
+          exifOrientation,
+          exif: normalizeExif(rawExif, {
+            width,
+            height,
+            keepRaw: cfg.exif === "full",
+          }),
         };
         setShots((prev) => [...prev, rec]);
         if (cfgRef.current.haptics) hapticShotFeedback();
-        if (st.shotCount >= cfgRef.current.maxShots) finish();
+        if (st.shotCount >= cfgRef.current.maxShots) endSweep("maxShots");
       }
     } catch {
       // Unmount mid-capture rejects; a live failure just leaves the
@@ -186,14 +333,18 @@ export function useGuidedSweep(options: GuidedSweepOptions = {}): GuidedSweep {
     }
   };
 
-  const maybeCapture = (toTarget: number, tiltMag: number) => {
+  const maybeCapture = (
+    toTarget: number,
+    tiltMag: number,
+    sample: TriggerSample,
+  ) => {
     const st = motion.current;
     const cfg = cfgRef.current;
     if (st.capturing || !st.active || !st.settled) return;
     if (toTarget > cfg.tolDeg || toTarget < -cfg.overshootDeg) return;
     if (tiltMag > cfg.tiltBlockDeg || st.rateEma > cfg.maxRateDegS) return;
     st.capturing = true;
-    doCapture(st.yaw, st.gen); // never rejects — all failure paths are handled inside
+    doCapture(st.yaw, st.gen, sample); // never rejects — all failure paths are handled inside
   };
 
   const onMotion = (m: DeviceMotionMeasurement) => {
@@ -248,6 +399,8 @@ export function useGuidedSweep(options: GuidedSweepOptions = {}): GuidedSweep {
           st.rateEma = Math.abs(yawRate);
           st.yaw = 0;
           st.settled = true;
+          // Record the level reference on the sweep meta (pure read of g0).
+          if (metaRef.current) metaRef.current.gravityRef = { ...st.g0 };
         }
       } else {
         st.settleCount = 0;
@@ -321,7 +474,14 @@ export function useGuidedSweep(options: GuidedSweepOptions = {}): GuidedSweep {
       status = SweepStatus.SLOW_DOWN;
     } else {
       status = SweepStatus.HOLD;
-      maybeCapture(toTarget, tiltMag);
+      maybeCapture(toTarget, tiltMag, {
+        tiltDeg,
+        rollDeg,
+        tiltMagDeg: tiltMag,
+        rateDegS: st.rateEma,
+        gravity: { x: gn.x, y: gn.y, z: gn.z },
+        sensorTs: ts,
+      });
     }
 
     pushHud({
@@ -353,10 +513,10 @@ export function useGuidedSweep(options: GuidedSweepOptions = {}): GuidedSweep {
   // "done" (shots taken so far remain valid) rather than resume blind.
   useEffect(() => {
     const sub = AppState.addEventListener("change", (s) => {
-      if (s !== "active" && motion.current.active) finish();
+      if (s !== "active" && motion.current.active) endSweep("background");
     });
     return () => sub.remove();
-  }, [finish]);
+  }, [endSweep]);
 
   return {
     phase,
@@ -369,5 +529,6 @@ export function useGuidedSweep(options: GuidedSweepOptions = {}): GuidedSweep {
     onCameraReady,
     isCameraReady,
     config,
+    meta,
   };
 }

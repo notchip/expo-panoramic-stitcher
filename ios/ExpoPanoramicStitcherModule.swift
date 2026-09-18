@@ -73,6 +73,8 @@ public class ExpoPanoramicStitcherModule: Module {
       blendStrength: options.blendStrength,
       matchConf: options.matchConf,
       panoConfidence: options.panoConfidence,
+      matchNeighbors: options.matchNeighbors,
+      matchWrap: options.matchWrap,
       outputWidth: options.outputWidth,
       autoResize: options.autoResize,
       jpegQuality: options.jpegQuality
@@ -82,6 +84,7 @@ public class ExpoPanoramicStitcherModule: Module {
     let width = (dict[PanoStitchWidthKey] as? Int) ?? 0
     let height = (dict[PanoStitchHeightKey] as? Int) ?? 0
     let usedIndices = (dict[PanoStitchUsedIndicesKey] as? [Int]) ?? []
+    let geometryJson = (dict[PanoStitchGeometryKey] as? String) ?? ""
     let error = (dict[PanoStitchErrorKey] as? String) ?? ""
 
     if !success {
@@ -96,6 +99,7 @@ public class ExpoPanoramicStitcherModule: Module {
       aspectRatio: height > 0 ? Double(width) / Double(height) : 0,
       usedIndices: usedIndices,
       usedCount: usedIndices.count,
+      geometryJson: geometryJson,
       errorMessage: ""
     )
   }
@@ -113,6 +117,7 @@ public class ExpoPanoramicStitcherModule: Module {
       height: result.height,
       usedIndices: result.usedIndices,
       usedCount: result.usedCount,
+      geometryJson: result.geometryJson,
       errorMessage: ""
     )
   }
@@ -138,6 +143,7 @@ public class ExpoPanoramicStitcherModule: Module {
       height: height,
       usedIndices: [0],
       usedCount: 1,
+      geometryJson: "", // pass-through: no stitch, no geometry
       errorMessage: ""
     )
   }
@@ -197,6 +203,8 @@ struct StitchOptions: Record {
   @Field var blendStrength: Int = 5
   @Field var matchConf: Float = 0.3
   @Field var panoConfidence: Float = 1.0
+  @Field var matchNeighbors: Int = 0
+  @Field var matchWrap: Bool = false
   @Field var outputWidth: Int = 4096
   @Field var autoResize: Bool = true
   @Field var jpegQuality: Int = 95
@@ -210,6 +218,8 @@ struct StitchResult: Record {
   @Field var aspectRatio: Double = 0
   @Field var usedIndices: [Int] = []
   @Field var usedCount: Int = 0
+  /// Compact JSON (StitchGeometry v1) or "" — parsed to `geometry` in TS.
+  @Field var geometryJson: String = ""
   @Field var errorMessage: String = ""
 }
 
@@ -220,5 +230,7 @@ struct StitchBase64Result: Record {
   @Field var height: Int = 0
   @Field var usedIndices: [Int] = []
   @Field var usedCount: Int = 0
+  /// Compact JSON (StitchGeometry v1) or "" — parsed to `geometry` in TS.
+  @Field var geometryJson: String = ""
   @Field var errorMessage: String = ""
 }
